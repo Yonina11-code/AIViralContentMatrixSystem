@@ -1,0 +1,185 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: 'Geist', 'Outfit', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.35);
+  outline-offset: 2px;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes soft-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-page-in {
+  animation: page-in 420ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.surface {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(228, 228, 231, 0.88);
+  box-shadow: 0 24px 50px -36px rgba(24, 24, 27, 0.45);
+}
+
+.control {
+  height: 2.5rem;
+  border-radius: 0.875rem;
+  border: 1px solid rgba(212, 212, 216, 0.9);
+  background: rgba(255, 255, 255, 0.9);
+  color: #3f3f46;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.control:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
+  outline: none;
+}
+
+.btn-primary,
+.btn-secondary,
+.btn-danger,
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.875rem;
+  font-weight: 650;
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 180ms ease, background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.btn-primary:active,
+.btn-secondary:active,
+.btn-danger:active,
+.btn-ghost:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+.btn-primary {
+  background: #18181b;
+  color: white;
+  box-shadow: 0 18px 35px -24px rgba(24, 24, 27, 0.8);
+}
+
+.btn-primary:hover {
+  background: #27272a;
+}
+
+.btn-secondary {
+  border: 1px solid rgba(212, 212, 216, 0.9);
+  background: rgba(255, 255, 255, 0.9);
+  color: #52525b;
+}
+
+.btn-secondary:hover {
+  border-color: #a1a1aa;
+  color: #18181b;
+}
+
+.btn-danger {
+  border: 1px solid rgba(254, 202, 202, 0.9);
+  background: rgba(254, 242, 242, 0.86);
+  color: #dc2626;
+}
+
+.btn-danger:hover {
+  border-color: #fca5a5;
+  background: #fee2e2;
+}
+
+.btn-ghost {
+  color: #71717a;
+}
+
+.btn-ghost:hover {
+  background: rgba(244, 244, 245, 0.9);
+  color: #27272a;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: #f4f4f5;
+}
+
+.skeleton::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
+  animation: soft-shimmer 1.4s infinite;
+}
+
+/* 文章正文样式 */
+.article-body h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: #18181b;
+}
+.article-body h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  color: #27272a;
+}
+.article-body blockquote {
+  border-left: 3px solid #d4d4d8;
+  margin: 1rem 0;
+  padding: 0.5rem 0 0.5rem 1rem;
+  color: #52525b;
+  font-style: italic;
+}
+.article-body blockquote.quote-golden {
+  border-left: none;
+  border-top: 2px solid #f59e0b;
+  border-bottom: 2px solid #f59e0b;
+  background: linear-gradient(to right, #fffbeb, #fef3c7);
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+  font-size: 1.05rem;
+  line-height: 1.75;
+  color: #92400e;
+  font-style: normal;
+  font-weight: 500;
+  text-align: center;
+  border-radius: 0.5rem;
+}

@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aiviral-redis
+    ports:
+      - "6380:6379"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiviral-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: helloworld
+      POSTGRES_DB: aiviral
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - aiviral-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  aiviral-postgres-data:
