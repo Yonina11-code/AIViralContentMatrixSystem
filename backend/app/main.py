@@ -1,9 +1,11 @@
 """AIViralContentMatrixSystem - FastAPI 主入口"""
 
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import init_db
@@ -39,6 +41,11 @@ app.include_router(content.router)
 app.include_router(assets.router)
 app.include_router(articles.router)
 app.include_router(domains.router)
+
+# Mount static files folder
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
 @app.get("/api/health")

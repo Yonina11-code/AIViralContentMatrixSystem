@@ -787,9 +787,20 @@ async def update_article(
             trace = list(article.agent_trace or [])
             while len(trace) < 2:
                 trace.append({})
-            if isinstance(trace[1], dict):
-                trace[1]["body"] = params.body
-                article.agent_trace = trace
+            
+            new_trace = []
+            for item in trace:
+                if isinstance(item, dict):
+                    new_trace.append(dict(item))
+                else:
+                    new_trace.append(item)
+            
+            new_trace[1]["body"] = params.body
+            article.agent_trace = new_trace
+            
+            # 强行标记变更以确保 SQLAlchemy 必将 json 字段打包进 UPDATE 执行
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(article, "agent_trace")
         else:
             article.body = params.body
 
@@ -806,6 +817,7 @@ async def update_article(
 @router.get("/{article_id}/suggestions")
 async def get_article_suggestions(
     article_id: str,
+    user_instruction: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """调取大模型智能输出 3 条一键采纳的个性化文稿润色与修改建议"""
@@ -813,37 +825,72 @@ async def get_article_suggestions(
     if not article:
         raise HTTPException(404, "文章不存在")
 
-    prompt = """你是一个顶级自媒体主笔。请针对以下文章内容，给出 3 条非常具体的、可「一键采纳」的高质量局部优化与润色建议。
+    # 提取最新的二审校验异常问题（如有）
+    issues = []
+    trace = article.agent_trace or []
+    if len(trace) > 3 and isinstance(trace[3], dict):
+        review_data = trace[3].get("second_review") or trace[3].get("review") or {}
+        if isinstance(review_data, dict):
+            issues = review_data.get("issues", [])
+
+    issues_text = ""
+    if issues:
+        issues_text = "\n".join([f"- [{iss.get('severity', '警告')}] {iss.get('detail', '')}" for iss in issues if iss.get('detail')])
+
+    if issues_text:
+        instruction = f"""你必须【首要且针对性地】围绕以下这篇文稿在校验中被检出的几项具体问题，给出 3 条可一键采纳的精准修复与润色建议，指导或帮助用户快速修正它们：
+        
+        {issues_text}
+        
+        建议生成具体要求：
+        1. 如果检出了敏感违规词（例如「特效药」），你必须在 suggestions 列表中给出一个替换建议（type 为 "body_replace"），original_text 设为正文里对应的那个敏感词（请确保字面完全一致，区分大小写），suggested_text 设为更稳妥、安全且克制的替换表述。
+        2. 如果检出了正文截断、缺少内文插图 prompt、开头场景不规范等，请给出补齐、插入或重写的建议。
+        3. 每个建议依然必须严格符合 type、target_label、description、original_text、suggested_text 结构，以支持前端一键采纳应用。
+        """
+    else:
+        instruction = """你必须提供 3 条具体的、可「一键采纳」的高质量局部优化与润色建议，分别覆盖以下 3 个核心模块：
+        1. 标题润色（类型 type 为 "title"）：
+           针对文章标题给出优化选项。建议被修改的原文 original_text 为当前文章的旧标题，suggested_text 为新标题。
+        2. 摘要润色（类型 type 为 "summary"）：
+           针对文章的简短摘要给出更具吸引力的改写。建议被修改的原文 original_text 为当前文章的旧摘要，suggested_text 为新摘要。
+        3. 正文细节/金句优化（类型 type 为 "body_replace"）：
+           针对正文开头场景、局部段落或者结尾温和金句进行改写。请完全从下方给出的正文中精准截取一段原文 original_text，suggested_text 为优化后的那段文字。
+        """
+
+    extra_instruction = ""
+    if user_instruction:
+        extra_instruction = f"""
+        
+        ⚠️⚠️⚠️【极其重要：用户提出了最新的润色重写指令，你必须 100% 严格遵从执行】：
+        "{user_instruction}"
+        你必须完全基于用户这个重写指令调整你的润色输出（例如：如果用户要求不要出现某些词、换某些词，或者文风要求等，你必须在生成的 suggestions 的 suggested_text 里落实！）
+        """
+
+    prompt = f"""你是一个顶级自媒体主笔。请针对以下文章内容，给出 3 条非常具体的、可「一键采纳」的高质量局部优化与润色建议。
     
-    你必须恰好提供 3 条建议，分别覆盖以下 3 个核心模块：
-    1. 标题润色（类型 type 为 "title"）：
-       针对文章标题给出优化选项。建议被修改的原文 original_text 为当前文章的旧标题，suggested_text 为新标题。
-    2. 摘要润色（类型 type 为 "summary"）：
-       针对文章的简短摘要给出更具吸引力的改写。建议被修改的原文 original_text 为当前文章的旧摘要，suggested_text 为新摘要。
-    3. 正文细节/金句优化（类型 type 为 "body_replace"）：
-       针对正文开头场景、局部段落或者结尾温和金句进行改写。请完全从下方给出的正文中精准截取一段原文 original_text，suggested_text 为优化后的那段文字。
+    {instruction}
+    {extra_instruction}
     
     请严格以 JSON 格式输出建议列表，每一条建议格式如下：
-    {
+    {{
       "type": "title"、"summary" 或 "body_replace",
-      "target_label": "优化的位置说明，例如：‘文章标题润色优化’、‘文章摘要吸引力升级’ 或 ‘正文开头场景优化’",
+      "target_label": "优化的位置说明，例如：‘清理违规敏感词’、‘补齐中途截断正文’ 或 ‘文章标题润色优化’",
       "description": "为什么要提出这个修改（简洁的修改原因，一两句话）",
       "original_text": "建议被替换的原文内容（请严格与下方正文中的文字完全一致）",
       "suggested_text": "建议替换成的优化后新内容（新文本）"
-    }
+    }}
     
     输出格式为 JSON：
-    {
+    {{
       "suggestions": [
-        { ... },
-        { ... },
-        { ... }
+        {{ ... }},
+        {{ ... }},
+        {{ ... }}
       ]
-    }
+    }}
     """
 
     body_md = ""
-    trace = article.agent_trace or []
     if len(trace) > 1 and isinstance(trace[1], dict):
         body_md = trace[1].get("body", "")
     if not body_md:
@@ -894,3 +941,39 @@ async def get_article_suggestions(
             ],
             "debug_error": str(e)
         }
+
+
+@router.post("/upload-image")
+async def upload_image(file: UploadFile = File(...)):
+    """人工/AI生图一键剪贴板上传图片，保存在本地静态目录中并返回相对路径"""
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(400, "只允许上传图片文件")
+        
+    import os
+    import uuid
+    
+    # 静态目录：G:\AI\AIViralContentMatrixSystem\backend\app\static\images
+    static_images_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+        "static", 
+        "images"
+    )
+    os.makedirs(static_images_dir, exist_ok=True)
+    
+    # 随机生成独一无二的文件名
+    file_ext = os.path.splitext(file.filename)[1] or ".png"
+    unique_filename = f"{uuid.uuid4().hex}{file_ext}"
+    target_path = os.path.join(static_images_dir, unique_filename)
+    
+    # 保存文件
+    try:
+        content = await file.read()
+        with open(target_path, "wb") as f:
+            f.write(content)
+    except Exception as e:
+        raise HTTPException(500, f"图片保存失败: {str(e)}")
+        
+    return {
+        "url": f"/static/images/{unique_filename}",
+        "success": True
+    }

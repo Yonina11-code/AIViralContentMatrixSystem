@@ -57,7 +57,24 @@ export const api = {
   reviewArticle: (id) => request(`/articles/${id}/review`, { method: 'POST' }),
   deleteArticle: (id) => request(`/articles/${id}`, { method: 'DELETE' }),
   updateArticle: (id, data) => request(`/articles/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  getArticleSuggestions: (id) => request(`/articles/${id}/suggestions`),
+  getArticleSuggestions: (id, userInstruction = '') => {
+    const q = new URLSearchParams()
+    if (userInstruction) q.set('user_instruction', userInstruction)
+    return request(`/articles/${id}/suggestions?${q}`)
+  },
+  uploadImage: async (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await fetch(`${BASE}/articles/upload-image`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`图片上传失败: ${res.status} ${err}`)
+    }
+    return res.json()
+  },
 
   // Stats & Dashboard
   getArticleStats: () => request('/articles/stats'),

@@ -35,6 +35,7 @@ export default function Articles() {
   const [suggestions, setSuggestions] = useState([])
   const [loadingSuggestions, setLoadingSuggestions] = useState(false)
   const [debugError, setDebugError] = useState(null)
+  const [customInstruction, setCustomInstruction] = useState('')
 
   // 文本框高度自适应 Refs 与逻辑
   const bodyRef = useRef(null)
@@ -57,11 +58,11 @@ export default function Articles() {
     }
   }, [editBody, editSummary, isEditing])
 
-  const loadSuggestions = async (id) => {
+  const loadSuggestions = async (id, instruction = '') => {
     setLoadingSuggestions(true)
     setDebugError(null)
     try {
-      const data = await api.getArticleSuggestions(id)
+      const data = await api.getArticleSuggestions(id, instruction)
       setSuggestions(data.suggestions || [])
       if (data.debug_error) {
         setDebugError(data.debug_error)
@@ -98,10 +99,55 @@ export default function Articles() {
     setSuggestions(prev => prev.filter(x => x !== sug))
   }
 
+  const handleBodyPaste = async (e) => {
+    const clipboardData = e.clipboardData
+    if (!clipboardData) return
+
+    const items = clipboardData.items
+    let imageFile = null
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        imageFile = items[i].getAsFile()
+        break
+      }
+    }
+
+    if (imageFile) {
+      e.preventDefault()
+      
+      const textarea = e.target
+      const start = textarea.selectionStart
+      const end = textarea.selectionEnd
+      const text = textarea.value
+      
+      const placeholder = `\n\n![🎨 正在上传剪贴板插图...](uploading)\n\n`
+      const newText = text.substring(0, start) + placeholder + text.substring(end)
+      setEditBody(newText)
+      
+      try {
+        const res = await api.uploadImage(imageFile)
+        if (res.success && res.url) {
+          const imgMarkdown = `\n\n![插图](${res.url})\n\n`
+          const finalPostPasteText = text.substring(0, start) + imgMarkdown + text.substring(end)
+          setEditBody(finalPostPasteText)
+          
+          setTimeout(() => {
+            adjustHeight(textarea)
+          }, 50)
+        }
+      } catch (err) {
+        alert('上传图片失败: ' + err.message)
+        setEditBody(text)
+      }
+    }
+  }
+
   const handleStartEdit = async () => {
     setLoadingFull(true)
     setSuggestions([])
     setLoadingSuggestions(false)
+    setCustomInstruction('')
     try {
       const data = await api.getArticle(selectedArticle.id)
       const art = data.article || data
@@ -354,6 +400,39 @@ export default function Articles() {
                   </div>
                 </div>
               )}
+
+              {/* 对话重写润色反馈入口 */}
+              <div className="mt-4 pt-3.5 border-t border-blue-100/60 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                <input
+                  type="text"
+                  value={customInstruction}
+                  onChange={e => setCustomInstruction(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !loadingSuggestions) {
+                      loadSuggestions(selectedArticle.id, customInstruction)
+                    }
+                  }}
+                  placeholder="💬 觉得建议不够贴心？在这里输入您的调教要求，让AI重构卡片（例如：换掉特效药这三个字，幽默风趣些）"
+                  className="control flex-1 text-xs px-3.5 h-10 border-blue-200 focus:ring-blue-500/20 focus:border-blue-400 bg-white"
+                />
+                <button
+                  onClick={() => loadSuggestions(selectedArticle.id, customInstruction)}
+                  disabled={loadingSuggestions}
+                  className="btn-primary text-[11px] h-10 px-5 font-bold shrink-0 cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  {loadingSuggestions ? (
+                    <>
+                      <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      构思中...
+                    </>
+                  ) : (
+                    '💬 让AI重构建议'
+                  )}
+                </button>
+              </div>
             </div>
           )}
 
@@ -392,6 +471,7 @@ export default function Articles() {
                   setEditBody(e.target.value)
                   adjustHeight(e.target)
                 }}
+                onPaste={handleBodyPaste}
                 className="control w-full p-4 text-xs min-h-[25rem] overflow-hidden font-mono leading-relaxed focus:ring-blue-500/10 focus:border-blue-300"
                 placeholder="在此修改您的 Markdown 正文..."
               />
