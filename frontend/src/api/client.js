@@ -27,6 +27,8 @@ export const api = {
   getDomains: () => request('/content/domains'),
   triggerCollection: (source = 'all', domain = 'tech', limit = 20) =>
     request(`/content/collect?source=${source}&domain=${domain}&limit=${limit}`, { method: 'POST' }),
+  getFoloStatus: () => request('/content/folo/status'),
+  triggerFoloLogin: () => request('/content/folo/login', { method: 'POST' }),
 
   deleteContent: (id) => request(`/content/${id}`, { method: 'DELETE' }),
   batchDeleteContent: (ids) => request('/content/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),

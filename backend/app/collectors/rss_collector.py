@@ -28,7 +28,11 @@ class RSSCollector(DataCollector):
                     if max_items and len(results) >= max_items:
                         break
                     title = entry.get("title", "")
-                    body = entry.get("description") or entry.get("content", [{}])[0].get("value", "") if entry.get("content") else ""
+                    body = ""
+                    if entry.get("content"):
+                        body = entry.get("content")[0].get("value", "")
+                    if not body:
+                        body = entry.get("summary") or entry.get("description") or ""
                     link = entry.get("link", "")
                     author = entry.get("author", "")
                     published = entry.get("published_parsed")

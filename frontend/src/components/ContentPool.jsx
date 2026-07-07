@@ -22,15 +22,42 @@ export default function ContentPool() {
   const [collectLimit, setCollectLimit] = useState(20)
   const [collecting, setCollecting] = useState(false)
   const [collectMsg, setCollectMsg] = useState(null)
+  const [foloStatus, setFoloStatus] = useState({ status: 'checking', user: null })
 
   const pageSize = 20
+
+  const checkFoloStatus = useCallback(() => {
+    api.getFoloStatus().then(data => setFoloStatus(data)).catch(() => {})
+  }, [])
 
   useEffect(() => {
     api.getDomains().then(data => {
       setDomains(data.domains)
       if (data.domains.length > 0) setCollectDomain(data.domains[0].id)
     }).catch(() => {})
-  }, [])
+    checkFoloStatus()
+  }, [checkFoloStatus])
+
+  const handleFoloLogin = async () => {
+    try {
+      const res = await api.triggerFoloLogin()
+      alert('已成功拉起浏览器登录窗口，请在浏览器中完成 Folo 登录。完成后本页面将自动刷新状态。')
+      let count = 0
+      const interval = setInterval(async () => {
+        count++
+        try {
+          const statusRes = await api.getFoloStatus()
+          if (statusRes.status === 'authenticated') {
+            setFoloStatus(statusRes)
+            clearInterval(interval)
+          }
+        } catch (e) {}
+        if (count >= 30) clearInterval(interval)
+      }, 2000)
+    } catch (e) {
+      alert('唤起登录失败：' + e.message)
+    }
+  }
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -331,6 +358,24 @@ export default function ContentPool() {
                     </button>
                   ))}
                 </div>
+
+                {collectSource === 'folo' && (
+                  <div className="mt-2.5 rounded-2xl border border-zinc-200/80 bg-zinc-50/50 px-3.5 py-2.5 text-xs flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-zinc-600">
+                      <span className={`h-2 w-2 rounded-full ${foloStatus.status === 'authenticated' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                      <span className="font-medium">
+                        {foloStatus.status === 'authenticated' 
+                          ? `Folo 已激活 (${foloStatus.user})` 
+                          : 'Folo 尚未登录授权'}
+                      </span>
+                    </div>
+                    {foloStatus.status !== 'authenticated' && (
+                      <button onClick={handleFoloLogin} className="text-xs text-blue-600 font-semibold hover:underline bg-transparent border-0 cursor-pointer p-0">
+                        立即登录授权 ↗
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* 选择领域 */}

@@ -4,7 +4,7 @@ import json
 import os
 import re
 
-from app.llm import llm_chat
+from app.llm import llm_chat, parse_llm_json
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _SENSITIVE_WORDS_PATH = os.path.join(_DATA_DIR, "sensitive_words.json")
@@ -311,24 +311,24 @@ class ReviewerAgent:
         """解析 LLM 审查结果"""
         try:
             if isinstance(raw, str):
-                data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
+                data = parse_llm_json(raw)
             else:
                 data = raw
             return data.get("issues", [])
-        except (json.JSONDecodeError, AttributeError):
+        except Exception:
             return []
 
     def _parse_fix_result(self, raw: str, orig_title: str, orig_body: str, orig_summary: str | None) -> dict:
         """解析 LLM 修正结果，回退到原文"""
         try:
-            data = json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
+            data = parse_llm_json(raw)
             return {
                 "title": data.get("title", orig_title),
                 "body": data.get("body", orig_body),
                 "summary": data.get("summary", orig_summary),
                 "changes": data.get("changes", ""),
             }
-        except json.JSONDecodeError:
+        except Exception:
             return {
                 "title": orig_title,
                 "body": orig_body,

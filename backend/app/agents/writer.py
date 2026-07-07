@@ -2,7 +2,7 @@
 
 import json
 
-from app.llm import llm_chat
+from app.llm import llm_chat, parse_llm_json
 
 SYSTEM_PROMPT = """你是一个像有经验的人类编辑一样写稿的微信公众号主笔。你的任务是根据总编选定的选题，结合内容资产库中的素材，写一篇让读者愿意继续读下去的文章。
 
@@ -88,6 +88,6 @@ class WriterAgent:
 
     def _parse_result(self, raw: str) -> dict:
         try:
-            return json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-        except json.JSONDecodeError:
+            return parse_llm_json(raw)
+        except Exception:
             return {"title": "未解析", "body": raw, "summary": ""}

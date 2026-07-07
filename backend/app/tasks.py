@@ -67,7 +67,15 @@ def _run_async(coro):
 @celery_app.task
 def collect_rss(feed_urls: list[str] | None = None, domain: str = "tech", limit: int = 20):
     """采集 RSS 数据源并存入数据库"""
-    urls = feed_urls or settings.domains.get(domain, {}).get("rss_feed_urls", [])
+    urls = feed_urls
+    if not urls:
+        with _sync_session_factory() as session:
+            from app.models.domain import Domain
+            d = session.get(Domain, domain)
+            urls = d.rss_feed_urls if d else []
+        if not urls:
+            urls = settings.domains.get(domain, {}).get("rss_feed_urls", [])
+
     collector = RSSCollector()
     results = _run_async(collector.collect(feed_urls=urls, domain=domain, max_items=limit))
     saved = _save_content_items(results)
@@ -95,7 +103,32 @@ def collect_folo(search_keywords: list[str] | None = None, domain: str = "tech",
     kw = search_keywords or settings.domains.get(domain, {}).get("folo_keywords", [])
     per_keyword = max(limit // max(len(kw), 1), 3) if limit else None
     collector = FoloCollector()
-    results = _run_async(collector.collect(search_keywords=kw, domain=domain, max_per_keyword=per_keyword))
+    results = []
+    try:
+        results = _run_async(collector.collect(search_keywords=kw, domain=domain, max_per_keyword=per_keyword))
+    except Exception as e:
+        print(f"[Task] collect_folo error: {e}")
+
+    # 自动降级机制：如果 Folo 采集由于授权等原因抓回 0 条，则自动切换为 RSS 兜底采集
+    if not results:
+        print(f"[Task] collect_folo({domain}) returned 0 items. Falling back to RSS...")
+        urls = []
+        with _sync_session_factory() as session:
+            from app.models.domain import Domain
+            d = session.get(Domain, domain)
+            urls = d.rss_feed_urls if d else []
+        if not urls:
+            urls = settings.domains.get(domain, {}).get("rss_feed_urls", [])
+            
+        if urls:
+            from app.collectors import RSSCollector
+            rss_collector = RSSCollector()
+            try:
+                results = _run_async(rss_collector.collect(feed_urls=urls, domain=domain, max_items=limit))
+                print(f"[Task] Fallback to RSS success: fetched {len(results)} items")
+            except Exception as re_err:
+                print(f"[Task] Fallback to RSS error: {re_err}")
+
     if limit and len(results) > limit:
         results = results[:limit]
     saved = _save_content_items(results)

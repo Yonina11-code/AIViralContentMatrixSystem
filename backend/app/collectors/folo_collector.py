@@ -19,32 +19,59 @@ from app.collectors.base import DataCollector, ContentItemData
 
 logger = logging.getLogger(__name__)
 
-FOLOCLI = "npx --yes folocli@latest"
-_FOLO_AUTH_CHECKED = False
+FOLOCLI = "npx --yes folocli"
+_FOLO_STATUS_CACHE = None
+_FOLO_STATUS_CACHE_TIME = 0.0
+FOLO_STATUS_CACHE_TTL = 30.0         # 成功状态缓存 30 秒
+FOLO_STATUS_FAIL_CACHE_TTL = 180.0   # 失败或超时状态缓存 3 分钟
+
+
+def get_folo_status_sync() -> dict:
+    """同步获取 FoloCLI 当前的登录状态（带双时效缓存与非 shell 超时保护）"""
+    global _FOLO_STATUS_CACHE, _FOLO_STATUS_CACHE_TIME
+    import time
+    now = time.time()
+    
+    # 检查双时效缓存，避免在检测失败/网络异常时频繁发起慢速调用
+    if _FOLO_STATUS_CACHE is not None:
+        last_status = _FOLO_STATUS_CACHE.get("status")
+        ttl = FOLO_STATUS_CACHE_TTL if last_status == "authenticated" else FOLO_STATUS_FAIL_CACHE_TTL
+        if (now - _FOLO_STATUS_CACHE_TIME) < ttl:
+            return _FOLO_STATUS_CACHE
+
+    res = {"status": "unauthorized", "user": None}
+    try:
+        # 在 Windows 上使用 npx.cmd，非 Windows 使用 npx，不开启 shell=True 确保 timeout 强制杀除子进程生效
+        import platform
+        cmd_name = "npx.cmd" if platform.system() == "Windows" else "npx"
+        
+        result = subprocess.run(
+            [cmd_name, "--yes", "folocli", "whoami"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            if data.get("ok") and data.get("data", {}).get("user"):
+                user = data["data"]["user"]
+                res = {"status": "authenticated", "user": user.get("name") or user.get("email")}
+        else:
+            logger.warning(f"Folo 状态检测返回码 {result.returncode}: {result.stderr.strip()[:100]}")
+    except subprocess.TimeoutExpired:
+        logger.warning("Folo 状态检测超时 (5 秒)")
+    except Exception as e:
+        logger.warning(f"Folo 状态检测异常: {e}")
+
+    _FOLO_STATUS_CACHE = res
+    _FOLO_STATUS_CACHE_TIME = now
+    return res
 
 
 def _ensure_folo_auth() -> bool:
     """确保 Folo 已登录，返回 True 表示已认证"""
-    global _FOLO_AUTH_CHECKED
-    if _FOLO_AUTH_CHECKED:
-        return True
-    try:
-        result = subprocess.run(
-            f"{FOLOCLI} whoami",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        data = json.loads(result.stdout)
-        if data.get("ok") and data.get("data", {}).get("user"):
-            _FOLO_AUTH_CHECKED = True
-            return True
-        logger.warning("Folo 未登录，请运行 `folocli login`")
-        return False
-    except Exception as e:
-        logger.warning(f"Folo 认证检查失败: {e}")
-        return False
+    status = get_folo_status_sync()
+    return status.get("status") == "authenticated"
 
 
 class FoloCollector(DataCollector):

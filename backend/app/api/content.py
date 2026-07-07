@@ -43,6 +43,26 @@ async def list_domains(db: AsyncSession = Depends(get_db)):
     return {"domains": items}
 
 
+@router.get("/folo/status")
+def get_folo_status():
+    """获取 FoloCLI 当前的登录状态（非阻塞、带缓存）"""
+    from app.collectors.folo_collector import get_folo_status_sync
+    return get_folo_status_sync()
+
+
+@router.post("/folo/login")
+async def trigger_folo_login():
+    """唤起本地默认浏览器进行 FoloCLI 登录授权"""
+    import subprocess
+    from app.collectors.folo_collector import FOLOCLI
+    try:
+        # 异步拉起 FoloCLI login，它会自动在 Windows 桌面上弹开默认的浏览器登录网页
+        subprocess.Popen(f"{FOLOCLI} login", shell=True)
+        return {"message": "已成功在你的浏览器中唤起 Folo 登录页，请在弹出的网页中完成登录。"}
+    except Exception as e:
+        raise HTTPException(500, f"唤起 Folo 登录失败: {e}")
+
+
 @router.get("")
 async def list_content(
     source: str | None = Query(None, description="按来源过滤"),

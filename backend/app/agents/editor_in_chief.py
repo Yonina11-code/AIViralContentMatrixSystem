@@ -2,7 +2,7 @@
 
 import json
 
-from app.llm import llm_chat
+from app.llm import llm_chat, parse_llm_json
 
 SYSTEM_PROMPT = """你是一个克制、敏锐的微信公众号真人编辑。你的工作是从 Content Pool 中的素材选定今日选题，并给写手一个像人类编辑会给出的清晰角度。
 
@@ -68,6 +68,6 @@ class EditorInChiefAgent:
 
     def _parse_result(self, raw: str) -> dict:
         try:
-            return json.loads(raw.strip().removeprefix("```json").removesuffix("```").strip())
-        except json.JSONDecodeError:
+            return parse_llm_json(raw)
+        except Exception:
             return {"selected_topic": raw[:100], "raw": raw}
