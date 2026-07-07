@@ -21,21 +21,35 @@ export default function Articles() {
   const [deleting, setDeleting] = useState(false)
   const [exporting, setExporting] = useState(false)
 
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const pageSize = 5
+  const totalPages = Math.ceil(total / pageSize)
+
   const fetchArticles = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
     try {
-      const data = await api.getArticles({ status: statusFilter || undefined })
+      const data = await api.getArticles({
+        status: statusFilter || undefined,
+        page,
+        page_size: pageSize
+      })
       setArticles(data.items)
+      setTotal(data.total || 0)
     } catch (e) {
       console.error(e)
       setLoadError(e.message)
     } finally {
       setLoading(false)
     }
-  }, [statusFilter])
+  }, [statusFilter, page])
 
   useEffect(() => { fetchArticles() }, [fetchArticles])
+
+  useEffect(() => {
+    setPage(1)
+  }, [statusFilter])
 
   useEffect(() => {
     setReviewResult(null)
@@ -368,6 +382,33 @@ export default function Articles() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* 分页 */}
+        {total > 0 && (
+          <div className="flex items-center justify-center gap-2 mt-6">
+            <button onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1}
+              className="btn-secondary h-9 px-3 text-xs disabled:opacity-30">
+              上一页
+            </button>
+            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+              let p
+              if (totalPages <= 7) p = i + 1
+              else if (page <= 4) p = i + 1
+              else if (page >= totalPages - 3) p = totalPages - 6 + i
+              else p = page - 3 + i
+              return (
+                <button key={p} onClick={() => setPage(p)}
+                  className={`h-9 w-9 rounded-xl font-mono text-xs transition-colors ${page === p ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100'}`}>
+                  {p}
+                </button>
+              )
+            })}
+            <button onClick={() => setPage(Math.min(totalPages, page + 1))} disabled={page === totalPages}
+              className="btn-secondary h-9 px-3 text-xs disabled:opacity-30">
+              下一页
+            </button>
           </div>
         )}
       </div>

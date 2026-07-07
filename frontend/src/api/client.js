@@ -29,6 +29,7 @@ export const api = {
     request(`/content/collect?source=${source}&domain=${domain}&limit=${limit}`, { method: 'POST' }),
   getFoloStatus: () => request('/content/folo/status'),
   triggerFoloLogin: () => request('/content/folo/login', { method: 'POST' }),
+  getCollectionStatus: (taskId) => request(`/content/collect/status/${taskId}`),
 
   deleteContent: (id) => request(`/content/${id}`, { method: 'DELETE' }),
   batchDeleteContent: (ids) => request('/content/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
@@ -37,10 +38,20 @@ export const api = {
   getArticles: (params) => {
     const q = new URLSearchParams()
     if (params?.status) q.set('status', params.status)
+    if (params?.page) q.set('page', params.page)
+    if (params?.page_size) q.set('page_size', params.page_size)
     return request(`/articles?${q}`)
   },
   getArticle: (id) => request(`/articles/${id}`),
-  generateArticle: (domain = 'tech') => request(`/articles/generate?domain=${domain}`, { method: 'POST' }),
+  generateArticle: (params) =>
+    request('/articles/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        domain: params?.domain || 'tech',
+        item_ids: params?.item_ids || null,
+        focus: params?.focus || null,
+      }),
+    }),
   publishArticle: (id) => request(`/articles/${id}/publish`, { method: 'POST' }),
   generateIllustrations: (id) => request(`/articles/${id}/illustrations`, { method: 'POST' }),
   reviewArticle: (id) => request(`/articles/${id}/review`, { method: 'POST' }),

@@ -126,6 +126,42 @@ export default function Generate() {
   const [loadingFull, setLoadingFull] = useState(false)
   const [elapsed, setElapsed] = useState(0)
 
+  // 用户的素材侧重点选择状态
+  const [selectedItems, setSelectedItems] = useState([])
+  const [focus, setFocus] = useState('')
+
+  const loadSelectedItems = () => {
+    try {
+      const stored = localStorage.getItem('selected_content_items')
+      if (stored) {
+        const items = JSON.parse(stored) || []
+        setSelectedItems(items)
+        if (items.length > 0 && items[0].domain) {
+          setSelectedDomain(items[0].domain)
+        }
+      }
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  useEffect(() => {
+    loadSelectedItems()
+    const handleHash = () => {
+      if (window.location.hash === '#generate') {
+        loadSelectedItems()
+      }
+    }
+    window.addEventListener('hashchange', handleHash)
+    return () => window.removeEventListener('hashchange', handleHash)
+  }, [])
+
+  const handleClearSelected = () => {
+    localStorage.removeItem('selected_content_items')
+    setSelectedItems([])
+    setFocus('')
+  }
+
   useEffect(() => {
     api.getDomains().then(data => {
       setDomains(data.domains)
@@ -155,8 +191,24 @@ export default function Generate() {
     setFullArticle(null)
     try {
       const domain = selectedDomain || domains[0]?.id || 'tech'
-      const data = await api.generateArticle(domain)
+      const itemIds = selectedItems.length > 0 ? selectedItems.map(i => i.id) : null
+      const data = await api.generateArticle({
+        domain,
+        item_ids: itemIds,
+        focus: focus || null
+      })
+      
       setResult(data)
+      if (data.id && !data.error) {
+        // 生成成功后清除选中素材
+        localStorage.removeItem('selected_content_items')
+        setSelectedItems([])
+        setFocus('')
+        
+        // 自动拉取全文
+        const detail = await api.getArticle(data.id)
+        setFullArticle(detail.article || detail)
+      }
     } catch (e) {
       setError(e.message)
     } finally {
@@ -216,6 +268,41 @@ export default function Generate() {
                 {generating ? '生成中...' : '开始生成'}
               </button>
             </div>
+
+            {/* 用户自定义素材与侧重点配置区域 */}
+            {selectedItems.length > 0 && (
+              <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-blue-800 flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-600 animate-ping" />
+                    已载入选定参考素材 ({selectedItems.length} 篇)
+                  </span>
+                  <button onClick={handleClearSelected} disabled={generating}
+                    className="text-xs text-blue-600 font-semibold hover:underline bg-transparent border-0 cursor-pointer p-0">
+                    清除选择，使用全自动选题 ✕
+                  </button>
+                </div>
+                
+                <ul className="space-y-1.5 text-xs text-zinc-600 list-decimal list-inside pl-1 bg-white/40 p-2.5 rounded-xl border border-zinc-100">
+                  {selectedItems.map((item) => (
+                    <li key={item.id} className="truncate" title={item.title}>
+                      {item.title}
+                    </li>
+                  ))}
+                </ul>
+
+                <div>
+                  <span className="mb-1.5 block text-xs font-medium text-zinc-500">文章写作侧重点 / 自定义指令（可选）</span>
+                  <textarea
+                    value={focus}
+                    onChange={e => setFocus(e.target.value)}
+                    disabled={generating}
+                    placeholder="请输入您对这篇文章的侧重点要求（例如：重点分析为什么吃无糖饮料依然会腹胀，用风趣幽默的文风来科普，字数 1500 字左右）..."
+                    className="control w-full p-3 text-xs h-20 resize-none placeholder:text-zinc-300 focus:ring-blue-500/10 focus:border-blue-300"
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="rounded-2xl border border-zinc-100 bg-zinc-50/70 p-4">
               <div className="mb-4 flex items-center justify-between gap-3">

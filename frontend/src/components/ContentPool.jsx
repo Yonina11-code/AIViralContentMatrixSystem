@@ -22,9 +22,10 @@ export default function ContentPool() {
   const [collectLimit, setCollectLimit] = useState(20)
   const [collecting, setCollecting] = useState(false)
   const [collectMsg, setCollectMsg] = useState(null)
+  const [activeTasks, setActiveTasks] = useState([])
   const [foloStatus, setFoloStatus] = useState({ status: 'checking', user: null })
 
-  const pageSize = 20
+  const pageSize = 8
 
   const checkFoloStatus = useCallback(() => {
     api.getFoloStatus().then(data => setFoloStatus(data)).catch(() => {})
@@ -74,18 +75,100 @@ export default function ContentPool() {
   // ── 采集 ────────────────────────────────────────────
   const handleCollect = async () => {
     setCollecting(true)
-    setCollectMsg(null)
+    setCollectMsg('正在提交采集任务，请稍候...')
     try {
       const res = await api.triggerCollection(collectSource, collectDomain, collectLimit)
-      setCollectMsg(`${res.tasks.length} 个采集任务已提交，目标领域「${domains.find(d => d.id === collectDomain)?.label || collectDomain}」`)
+      const tasks = res.tasks || []
+      if (tasks.length === 0) {
+        setCollectMsg('未提交任何采集任务。')
+        setCollecting(false)
+        return
+      }
       setShowModal(false)
-      setTimeout(() => { fetchData(); setCollectMsg(null) }, 4000)
+      setCollectMsg('采集任务已提交，后台正在处理中，请稍候...')
+      
+      const tasksToPoll = tasks.map(t => ({ ...t, status: 'PENDING', result: null }))
+      setActiveTasks(tasksToPoll)
     } catch (e) {
       setCollectMsg(`采集失败：${e.message}`)
-    } finally {
       setCollecting(false)
     }
   }
+
+  // 轮询采集任务的真实状态与结果
+  useEffect(() => {
+    if (activeTasks.length === 0) return undefined
+
+    const timer = setInterval(async () => {
+      let allDone = true
+      const updatedTasks = []
+
+      for (const t of activeTasks) {
+        if (t.status === 'SUCCESS' || t.status === 'FAILURE') {
+          updatedTasks.push(t)
+          continue
+        }
+
+        try {
+          const statusRes = await api.getCollectionStatus(t.task_id)
+          const newStatus = statusRes.status
+          const newResult = statusRes.result
+
+          updatedTasks.push({
+            ...t,
+            status: newStatus,
+            result: newResult
+          })
+
+          if (newStatus !== 'SUCCESS' && newStatus !== 'FAILURE') {
+            allDone = false
+          }
+        } catch (err) {
+          updatedTasks.push({
+            ...t,
+            status: 'FAILURE',
+            result: err.message
+          })
+        }
+      }
+
+      setActiveTasks(updatedTasks)
+
+      if (allDone) {
+        clearInterval(timer)
+
+        // 任务全部结束，汇总输出结果
+        const details = []
+        updatedTasks.forEach(x => {
+          const srcLabel = x.source === 'folo' ? 'Folo智能' : x.source === 'rss' ? 'RSS' : '搜索引擎'
+          if (x.status === 'SUCCESS') {
+            const col = x.result?.collected ?? 0
+            const sav = x.result?.saved ?? 0
+            details.push(`${srcLabel}抓回 ${col} 条，入库 ${sav} 条`)
+          } else if (x.status === 'FAILURE') {
+            details.push(`${srcLabel}失败(${x.result || '网络异常'})`)
+          }
+        })
+
+        let msg = '数据采集完成。'
+        if (details.length > 0) {
+          msg = `采集结束：${details.join('；')}`
+        }
+
+        setCollectMsg(msg)
+        setCollecting(false)
+        setActiveTasks([])
+        fetchData() // 自动刷新列表数据
+
+        // 6 秒后自动收起结果气泡
+        setTimeout(() => {
+          setCollectMsg(null)
+        }, 6000)
+      }
+    }, 3000)
+
+    return () => clearInterval(timer)
+  }, [activeTasks, fetchData])
 
   // ── 删除 ────────────────────────────────────────────
   const handleDelete = async (id) => {
@@ -129,6 +212,13 @@ export default function ContentPool() {
     } finally {
       setDeleting(null)
     }
+  }
+
+  const handleGenerateFromSelected = () => {
+    const selectedItems = items.filter(i => selectedIds.has(i.id))
+    localStorage.setItem('selected_content_items', JSON.stringify(selectedItems))
+    setSelectedIds(new Set())
+    window.location.hash = '#generate'
   }
 
   const totalPages = Math.ceil(total / pageSize)
@@ -203,10 +293,16 @@ export default function ContentPool() {
         </label>
 
         {selectedIds.size > 0 && (
-          <button onClick={handleBatchDelete} disabled={deleting === 'batch'}
-            className="btn-danger h-10 px-4 text-xs disabled:opacity-40">
-            {deleting === 'batch' ? '删除中...' : `删除 ${selectedIds.size} 条`}
-          </button>
+          <div className="flex gap-2">
+            <button onClick={handleGenerateFromSelected}
+              className="btn-primary h-10 px-4.5 text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium flex items-center gap-1.5 shadow-sm active:scale-[0.98]">
+              ✨ 生成文章 ({selectedIds.size})
+            </button>
+            <button onClick={handleBatchDelete} disabled={deleting === 'batch'}
+              className="btn-danger h-10 px-4 text-xs disabled:opacity-40">
+              {deleting === 'batch' ? '删除中...' : `删除 ${selectedIds.size} 条`}
+            </button>
+          </div>
         )}
 
         <button onClick={() => setShowModal(true)}
@@ -303,7 +399,7 @@ export default function ContentPool() {
       )}
 
       {/* 分页 */}
-      {totalPages > 1 && (
+      {total > 0 && (
         <div className="flex items-center justify-center gap-2 mt-6">
           <button onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1}
             className="btn-secondary h-9 px-3 text-xs disabled:opacity-30">

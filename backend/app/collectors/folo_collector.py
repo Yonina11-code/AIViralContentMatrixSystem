@@ -23,7 +23,14 @@ FOLOCLI = "npx --yes folocli"
 _FOLO_STATUS_CACHE = None
 _FOLO_STATUS_CACHE_TIME = 0.0
 FOLO_STATUS_CACHE_TTL = 30.0         # 成功状态缓存 30 秒
-FOLO_STATUS_FAIL_CACHE_TTL = 180.0   # 失败或超时状态缓存 3 分钟
+FOLO_STATUS_FAIL_CACHE_TTL = 2.0     # 失败或超时状态缓存 2 秒（匹配前端 2s 轮询周期）
+
+
+def clear_folo_status_cache():
+    """手动清除 Folo 状态缓存"""
+    global _FOLO_STATUS_CACHE, _FOLO_STATUS_CACHE_TIME
+    _FOLO_STATUS_CACHE = None
+    _FOLO_STATUS_CACHE_TIME = 0.0
 
 
 def get_folo_status_sync() -> dict:
@@ -48,8 +55,8 @@ def get_folo_status_sync() -> dict:
         result = subprocess.run(
             [cmd_name, "--yes", "folocli", "whoami"],
             capture_output=True,
-            text=True,
-            timeout=5,
+            encoding="utf-8",
+            timeout=12,
         )
         if result.returncode == 0:
             data = json.loads(result.stdout)
@@ -145,7 +152,7 @@ class FoloCollector(DataCollector):
         cmd = f'{FOLOCLI} search discover "{keyword}"'
         try:
             raw = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=30
+                cmd, shell=True, capture_output=True, encoding="utf-8", timeout=30
             )
             data = json.loads(raw.stdout)
             if data.get("ok"):
@@ -164,7 +171,7 @@ class FoloCollector(DataCollector):
         cmd = f'{FOLOCLI} subscription add --feed "{feed_url}"'
         try:
             raw = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=15
+                cmd, shell=True, capture_output=True, encoding="utf-8", timeout=15
             )
             data = json.loads(raw.stdout)
             return data.get("ok", False)

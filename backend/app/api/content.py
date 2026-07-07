@@ -35,6 +35,25 @@ async def trigger_collection(
     return {"message": "采集任务已提交", "tasks": tasks}
 
 
+@router.get("/collect/status/{task_id}")
+def get_collection_task_status(task_id: str):
+    """查询异步采集任务的当前状态与执行结果"""
+    from celery.result import AsyncResult
+    from app.celery_app import celery_app
+    res = AsyncResult(task_id, app=celery_app)
+    state = res.state
+    info = None
+    if state == "SUCCESS":
+        info = res.result
+    elif state == "FAILURE":
+        info = str(res.result)
+    return {
+        "task_id": task_id,
+        "status": state,
+        "result": info
+    }
+
+
 @router.get("/domains")
 async def list_domains(db: AsyncSession = Depends(get_db)):
     """返回可用的领域列表（供前端筛选器使用）"""
@@ -54,8 +73,10 @@ def get_folo_status():
 async def trigger_folo_login():
     """唤起本地默认浏览器进行 FoloCLI 登录授权"""
     import subprocess
-    from app.collectors.folo_collector import FOLOCLI
+    from app.collectors.folo_collector import FOLOCLI, clear_folo_status_cache
     try:
+        # 唤起登录的同时清除原先的缓存状态，以便后续轮询或刷新时获取最新检测结果
+        clear_folo_status_cache()
         # 异步拉起 FoloCLI login，它会自动在 Windows 桌面上弹开默认的浏览器登录网页
         subprocess.Popen(f"{FOLOCLI} login", shell=True)
         return {"message": "已成功在你的浏览器中唤起 Folo 登录页，请在弹出的网页中完成登录。"}

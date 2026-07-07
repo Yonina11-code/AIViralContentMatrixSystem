@@ -20,17 +20,25 @@ _sync_session_factory = sessionmaker(bind=_sync_engine)
 
 
 def _save_content_items(items) -> int:
-    """将采集到的内容批量写入数据库（去重）"""
+    """将采集到的内容批量写入数据库（内存+数据库去重）"""
     saved = 0
+    seen_fingerprints = set()
     with _sync_session_factory() as session:
         for item in items:
-            if item.fingerprint:
-                existing = session.execute(
-                    text("SELECT id FROM content_items WHERE fingerprint = :fp"),
-                    {"fp": item.fingerprint},
-                ).first()
-                if existing:
-                    continue
+            if not item.fingerprint:
+                continue
+                
+            # 内存防重（批次内去重）
+            if item.fingerprint in seen_fingerprints:
+                continue
+
+            # 数据库防重
+            existing = session.execute(
+                text("SELECT id FROM content_items WHERE fingerprint = :fp"),
+                {"fp": item.fingerprint},
+            ).first()
+            if existing:
+                continue
 
             ci = ContentItem(
                 title=item.title,
@@ -50,6 +58,7 @@ def _save_content_items(items) -> int:
                 domain=item.domain,
             )
             session.add(ci)
+            seen_fingerprints.add(item.fingerprint)
             saved += 1
 
         session.commit()
@@ -86,7 +95,14 @@ def collect_rss(feed_urls: list[str] | None = None, domain: str = "tech", limit:
 @celery_app.task
 def collect_search(keywords: list[str] | None = None, domain: str = "tech", limit: int = 20):
     """搜索引擎采集并存入数据库（关键字均衡分布）"""
-    kw = keywords or settings.domains.get(domain, {}).get("search_keywords", [])
+    kw = keywords
+    if not kw:
+        with _sync_session_factory() as session:
+            from app.models.domain import Domain
+            d = session.get(Domain, domain)
+            kw = d.search_keywords if d else []
+        if not kw:
+            kw = settings.domains.get(domain, {}).get("search_keywords", [])
     per_keyword = max(limit // max(len(kw), 1), 3) if limit else None
     collector = SearchEngineCollector()
     results = _run_async(collector.collect(keywords=kw, domain=domain, max_per_keyword=per_keyword))
@@ -100,7 +116,14 @@ def collect_search(keywords: list[str] | None = None, domain: str = "tech", limi
 @celery_app.task
 def collect_folo(search_keywords: list[str] | None = None, domain: str = "tech", limit: int = 20):
     """Folo 智能数据源采集并存入数据库（关键字均衡分布）"""
-    kw = search_keywords or settings.domains.get(domain, {}).get("folo_keywords", [])
+    kw = search_keywords
+    if not kw:
+        with _sync_session_factory() as session:
+            from app.models.domain import Domain
+            d = session.get(Domain, domain)
+            kw = d.folo_keywords if d else []
+        if not kw:
+            kw = settings.domains.get(domain, {}).get("folo_keywords", [])
     per_keyword = max(limit // max(len(kw), 1), 3) if limit else None
     collector = FoloCollector()
     results = []

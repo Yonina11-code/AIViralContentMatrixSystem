@@ -34,18 +34,26 @@ reviewer = ReviewerAgent()
 wechat = WeChatPublisher()
 
 
-async def _summarize_content_pool(db: AsyncSession, domain: str | None = None) -> tuple[str, list[ContentItem]]:
-    """从 Content Pool 中生成摘要用于总编决策，排除已使用过的内容"""
-    query = select(ContentItem).where(ContentItem.used_at.is_(None)).order_by(ContentItem.collected_at.desc())
-    if domain:
-        query = query.where(ContentItem.domain == domain)
-    query = query.limit(30)
+async def _summarize_content_pool(
+    db: AsyncSession,
+    domain: str | None = None,
+    item_ids: list[str] | None = None
+) -> tuple[str, list[ContentItem]]:
+    """从 Content Pool 中生成摘要用于总编决策，排除已使用过的内容（若指定了特定的 item_ids 则直接使用它们作为数据源）"""
+    if item_ids:
+        query = select(ContentItem).where(ContentItem.id.in_(item_ids))
+    else:
+        query = select(ContentItem).where(ContentItem.used_at.is_(None)).order_by(ContentItem.collected_at.desc())
+        if domain:
+            query = query.where(ContentItem.domain == domain)
+        query = query.limit(30)
+        
     rows = (await db.execute(query)).scalars().all()
     if not rows:
         return "暂无采集数据", []
     summaries = []
     for r in rows:
-        summaries.append(f"- [{r.source}] {r.title} (来源: {r.source_name}, 领域: {r.domain})")
+        summaries.append(f"- [{r.source}] {r.title} (ID: {r.id}, 来源: {r.source_name}, 领域: {r.domain})")
     return "\n".join(summaries), rows
 
 
@@ -106,16 +114,32 @@ async def _review_and_repair_written(written: dict, review_agent: ReviewerAgent)
     return repaired, review_trace, second_review["passed"]
 
 
+from pydantic import BaseModel
+
+class GenerateParams(BaseModel):
+    domain: str = "tech"
+    item_ids: list[str] | None = None
+    focus: str | None = None
+
+
 @router.post("/generate")
 async def generate_article(
-    domain: str = "tech",
+    params: GenerateParams,
     db: AsyncSession = Depends(get_db),
 ):
-    """全自动生成一篇文章：总编 -> 正文 -> 发布"""
+    """根据自定义素材或全自动选题生成一篇文章：总编 -> 正文 -> 审核 -> 发布"""
+    domain = params.domain
+    item_ids = params.item_ids
+    focus = params.focus
+
     # Step 1: 总编选题
-    pool_summary, pool_items = await _summarize_content_pool(db, domain=domain)
+    pool_summary, pool_items = await _summarize_content_pool(db, domain=domain, item_ids=item_ids)
     if not pool_items:
-        return {"error": "内容池暂无可用素材，请先采集内容", "id": None}
+        return {"error": "暂无可用素材，请重新选择或先采集内容", "id": None}
+
+    # 强力注入用户的自定义侧重点到总编提示词
+    if focus:
+        pool_summary += f"\n\n## 用户指定的文章选题侧重点/自定义要求（你必须严格遵守此限制，围绕此侧重点来决策和构思 angle）：\n{focus}\n"
 
     # 附上已有文章标题，避免重复选题
     recent_titles = await _list_recent_article_titles(db)
@@ -363,6 +387,8 @@ async def review_article(article_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("")
 async def list_articles(
     status: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(Article).order_by(Article.created_at.desc())
@@ -371,14 +397,22 @@ async def list_articles(
             query = query.where(Article.status == article_status_from_public_value(status))
         except ValueError:
             raise HTTPException(400, f"未知文章状态：{status}")
+
+    # 计算总数
+    count_query = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_query)).scalar() or 0
+
+    # 物理分页
+    query = query.offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(query)).scalars().all()
+
     return {
         "items": [{
             "id": r.id,
             "title": r.title,
             "summary": r.summary,
             "status": article_status_public_value(r.status),
-            "word_count": len(r.body),
+            "word_count": len(r.body) if r.body else 0,
             "read_count": r.read_count,
             "like_count": r.like_count,
             "created_at": r.created_at.isoformat(),
@@ -386,7 +420,9 @@ async def list_articles(
             "has_illustrations": bool(r.agent_trace and len(r.agent_trace) > 2 and r.agent_trace[2] and r.agent_trace[2].get("cover")),
             "has_review": bool(r.agent_trace and len(r.agent_trace) > 3 and r.agent_trace[3] and r.agent_trace[3].get("review")),
         } for r in rows],
-        "total": len(rows),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
     }
 
 
