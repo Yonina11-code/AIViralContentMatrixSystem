@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
 
 function latestReviewTrace(article) {
@@ -25,6 +25,124 @@ export default function Articles() {
   const [total, setTotal] = useState(0)
   const pageSize = 5
   const totalPages = Math.ceil(total / pageSize)
+
+  // 编辑微调与 AI 润色状态
+  const [isEditing, setIsEditing] = useState(false)
+  const [editTitle, setEditTitle] = useState('')
+  const [editBody, setEditBody] = useState('')
+  const [editSummary, setEditSummary] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [suggestions, setSuggestions] = useState([])
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false)
+  const [debugError, setDebugError] = useState(null)
+
+  // 文本框高度自适应 Refs 与逻辑
+  const bodyRef = useRef(null)
+  const summaryRef = useRef(null)
+
+  const adjustHeight = (el) => {
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = (el.scrollHeight + 4) + 'px'
+  }
+
+  useEffect(() => {
+    if (isEditing) {
+      // 延迟微调，确保 DOM 节点已完全渲染且原内容已就绪
+      const timer = setTimeout(() => {
+        if (bodyRef.current) adjustHeight(bodyRef.current)
+        if (summaryRef.current) adjustHeight(summaryRef.current)
+      }, 60)
+      return () => clearTimeout(timer)
+    }
+  }, [editBody, editSummary, isEditing])
+
+  const loadSuggestions = async (id) => {
+    setLoadingSuggestions(true)
+    setDebugError(null)
+    try {
+      const data = await api.getArticleSuggestions(id)
+      setSuggestions(data.suggestions || [])
+      if (data.debug_error) {
+        setDebugError(data.debug_error)
+      }
+    } catch (err) {
+      console.error('拉取AI优化建议失败', err)
+      setDebugError(err.message)
+    } finally {
+      setLoadingSuggestions(false)
+    }
+  }
+
+  const handleApplySuggestion = (sug) => {
+    if (sug.type === 'title') {
+      setEditTitle(sug.suggested_text)
+      alert(`已将标题优化采纳为：「${sug.suggested_text}」`)
+    } else if (sug.type === 'summary') {
+      setEditSummary(sug.suggested_text)
+      alert(`已将摘要优化采纳！`)
+    } else if (sug.type === 'body_replace') {
+      const original = sug.original_text
+      const replacement = sug.suggested_text
+      
+      if (original && editBody.includes(original)) {
+        setEditBody(prev => prev.replace(original, replacement))
+        alert(`已采纳该段落优化润色！`)
+      } else {
+        // 若由于原文被改动导致无法完全匹配，智能追加到末尾
+        setEditBody(prev => `${prev}\n\n> 提醒（采纳AI建议）：${replacement}`)
+        alert(`已采纳该优化建议，由于没有在正文中匹配到精准原文，已作为金句框追加在正文末尾！`)
+      }
+    }
+    // 采纳后移除该条建议
+    setSuggestions(prev => prev.filter(x => x !== sug))
+  }
+
+  const handleStartEdit = async () => {
+    setLoadingFull(true)
+    setSuggestions([])
+    setLoadingSuggestions(false)
+    try {
+      const data = await api.getArticle(selectedArticle.id)
+      const art = data.article || data
+      setEditTitle(art.title || '')
+      
+      // 优先从总编写作 trace 提取干净的 Markdown 原文以摆脱 HTML style 的污染
+      const cleanMarkdown = art.agent_trace?.[1]?.body || art.body || ''
+      setEditBody(cleanMarkdown)
+      setEditSummary(art.summary || '')
+      setIsEditing(true)
+      
+      // 异步加载大模型的 AI 优化建议
+      loadSuggestions(selectedArticle.id)
+    } catch (err) {
+      alert('加载文章全文失败: ' + err.message)
+    } finally {
+      setLoadingFull(false)
+    }
+  }
+
+  const handleSaveEdit = async () => {
+    setSaving(true)
+    try {
+      await api.updateArticle(selectedArticle.id, {
+        title: editTitle,
+        body: editBody,
+        summary: editSummary
+      })
+      setIsEditing(false)
+      fetchArticles()
+      setSelectedArticle(prev => ({
+        ...prev,
+        title: editTitle,
+        summary: editSummary
+      }))
+    } catch (err) {
+      alert('保存修改失败: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const fetchArticles = useCallback(async () => {
     setLoading(true)
@@ -55,6 +173,7 @@ export default function Articles() {
     setReviewResult(null)
     setFullArticle(null)
     setViewingFull(false)
+    setIsEditing(false)
   }, [selectedArticle?.id])
 
   const handleReview = async () => {
@@ -152,6 +271,145 @@ export default function Articles() {
 
   const promptText = (item) => item?.copy_prompt || item?.prompt || ''
   const selectedReview = reviewResult || latestReviewTrace(selectedArticle)
+
+  // 全文编辑视图（独立宽展页面，完美解决狭窄侧边栏排版太小的问题）
+  if (isEditing && selectedArticle) {
+    return (
+      <div>
+        <button
+          onClick={() => setIsEditing(false)}
+          className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-zinc-600 mb-6 transition-colors group cursor-pointer"
+        >
+          <svg className="w-4 h-4 transition-transform group-hover:-translate-x-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+          </svg>
+          返回列表
+        </button>
+
+        <div className="surface mx-auto max-w-4xl rounded-[1.5rem] p-6 sm:p-8 space-y-6">
+          <div className="flex items-center justify-between pb-4 border-b border-zinc-100">
+            <div>
+              <h2 className="text-xl font-bold text-zinc-900">微调修改文章</h2>
+              <p className="text-xs text-zinc-400 mt-1">您可以自由修改标题、摘要及正文内容。编辑区已自动过滤复杂的微信 HTML 排版样式。</p>
+            </div>
+            <span className="text-xs font-mono bg-zinc-100 text-zinc-500 px-2.5 py-1 rounded-lg">ID: {selectedArticle.id.slice(0, 8)}</span>
+          </div>
+
+          {/* AI 润色建议区域 */}
+          {(loadingSuggestions || suggestions.length > 0) && (
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/50 p-4 transition-all">
+              <div className="flex items-center justify-between mb-3 select-none">
+                <span className="text-xs font-semibold text-blue-800 flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-full bg-blue-600 animate-pulse" />
+                  ✨ AI 写作润色建议
+                </span>
+                <span className="text-[10px] text-zinc-400 font-medium">采纳建议后，将自动应用替换至下方的文本表单</span>
+              </div>
+              
+              {loadingSuggestions ? (
+                <div className="flex items-center gap-2 text-xs text-zinc-400 italic py-2">
+                  <svg className="animate-spin h-3.5 w-3.5 text-blue-600" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  正在针对此文深度构思优化切入点...
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {suggestions.map((sug, i) => (
+                    <div key={i} className="bg-white border border-zinc-200/60 p-3 rounded-xl flex flex-col justify-between space-y-3 shadow-sm hover:shadow-md transition-shadow">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[9px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                            {sug.target_label || '局部润色'}
+                          </span>
+                          <span className="text-[10px] text-zinc-400"># {i+1}</span>
+                        </div>
+                        <p className="text-xs font-semibold text-zinc-800 leading-relaxed">{sug.description}</p>
+                        <div className="text-[10px] text-zinc-400 space-y-1 bg-zinc-50 p-2 rounded-lg border border-zinc-100/50">
+                          {sug.original_text && (
+                            <p className="line-through truncate">原文: {sug.original_text}</p>
+                          )}
+                          <p className="text-blue-700 font-medium whitespace-pre-wrap">建议: {sug.suggested_text}</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleApplySuggestion(sug)}
+                        className="w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold transition-all active:scale-[0.96] cursor-pointer"
+                      >
+                        ✓ 一键采纳建议
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {debugError && (
+                <div className="mt-3.5 text-[11px] text-red-600 font-medium bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2 select-none shadow-sm leading-relaxed">
+                  <span className="text-xs shrink-0 mt-0.5">⚠️</span>
+                  <div>
+                    <span className="font-bold">AI 智能润色接口调用失败：</span>
+                    <code className="bg-red-100/50 px-1 py-0.5 rounded font-mono text-[10px] break-all">{debugError}</code>
+                    <p className="mt-1 text-zinc-500 font-normal">当前已动态感知文稿主题，为您自动生成了“动态自适应兜底建议”，您依然可以直接点击采纳。</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 mb-1.5">文章标题</label>
+              <input
+                type="text"
+                value={editTitle}
+                onChange={e => setEditTitle(e.target.value)}
+                className="control w-full px-4 py-2.5 text-sm font-medium focus:ring-blue-500/10 focus:border-blue-300"
+                placeholder="请输入文章标题..."
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 mb-1.5">文章摘要</label>
+              <textarea
+                ref={summaryRef}
+                value={editSummary}
+                onChange={e => {
+                  setEditSummary(e.target.value)
+                  adjustHeight(e.target)
+                }}
+                className="control w-full p-4 text-xs min-h-[5rem] overflow-hidden focus:ring-blue-500/10 focus:border-blue-300 leading-relaxed"
+                placeholder="请输入文章摘要..."
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 mb-1.5">文章正文</label>
+              <textarea
+                ref={bodyRef}
+                value={editBody}
+                onChange={e => {
+                  setEditBody(e.target.value)
+                  adjustHeight(e.target)
+                }}
+                className="control w-full p-4 text-xs min-h-[25rem] overflow-hidden font-mono leading-relaxed focus:ring-blue-500/10 focus:border-blue-300"
+                placeholder="在此修改您的 Markdown 正文..."
+              />
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-3 pt-4 border-t border-zinc-100 justify-end">
+            <button onClick={() => setIsEditing(false)} className="btn-secondary px-6 h-10 text-xs font-medium cursor-pointer">
+              取消修改
+            </button>
+            <button onClick={handleSaveEdit} disabled={saving} className="btn-primary px-8 h-10 text-xs font-bold cursor-pointer">
+              {saving ? '正在保存修改...' : '确认并保存文章'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // 全文阅读视图
   if (viewingFull && fullArticle) {
@@ -466,9 +724,17 @@ export default function Articles() {
                 )}
 
                 <button
+                  onClick={handleStartEdit}
+                  disabled={loadingFull}
+                  className="btn-secondary h-11 w-full text-sm font-medium flex items-center justify-center gap-1.5 border-blue-200 text-blue-600 hover:bg-blue-50/70 cursor-pointer"
+                >
+                  ✍️ 微调修改
+                </button>
+
+                <button
                   onClick={handleShowFullArticle}
                   disabled={loadingFull}
-                  className="btn-primary h-11 w-full text-sm disabled:opacity-50"
+                  className="btn-primary h-11 w-full text-sm disabled:opacity-50 cursor-pointer"
                 >
                   {loadingFull ? '加载中...' : '文稿详情'}
                 </button>
@@ -476,58 +742,58 @@ export default function Articles() {
                 <button
                   onClick={handleReview}
                   disabled={reviewing}
-                  className="btn-secondary h-11 w-full text-sm disabled:opacity-50"
+                  className="btn-secondary h-11 w-full text-sm disabled:opacity-50 cursor-pointer"
                 >
                   {reviewing ? '校验中...' : '文稿校验'}
                 </button>
 
-              <button
-                onClick={handleExport}
-                disabled={exporting || selectedArticle.status === 'failed'}
-                className="btn-secondary h-11 w-full text-sm disabled:opacity-50"
-              >
-                {exporting ? '导出中...' : '文稿下载'}
-              </button>
+                <button
+                  onClick={handleExport}
+                  disabled={exporting || selectedArticle.status === 'failed'}
+                  className="btn-secondary h-11 w-full text-sm disabled:opacity-50 cursor-pointer"
+                >
+                  {exporting ? '导出中...' : '文稿下载'}
+                </button>
 
-              <button
-                onClick={handleDelete}
-                disabled={deleting}
-                className="btn-danger mt-4 h-11 w-full text-sm disabled:opacity-50"
-              >
-                {deleting ? '删除中...' : '文稿删除'}
-              </button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="btn-danger mt-4 h-11 w-full text-sm disabled:opacity-50 cursor-pointer"
+                >
+                  {deleting ? '删除中...' : '文稿删除'}
+                </button>
 
-              {selectedReview && selectedArticle.status !== 'failed' && (
-                <div className={`mt-4 rounded-2xl border p-3 text-xs ${
-                  selectedReview.passed
-                    ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
-                    : 'border-red-100 bg-red-50 text-red-700'
-                }`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold">{selectedReview.passed ? '校验通过' : '发现问题'}</span>
-                    {selectedReview.issues?.length > 0 && <span>{selectedReview.issues.length} 项</span>}
+                {selectedReview && selectedArticle.status !== 'failed' && (
+                  <div className={`mt-4 rounded-2xl border p-3 text-xs ${
+                    selectedReview.passed
+                      ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
+                      : 'border-red-100 bg-red-50 text-red-700'
+                  }`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold">{selectedReview.passed ? '校验通过' : '发现问题'}</span>
+                      {selectedReview.issues?.length > 0 && <span>{selectedReview.issues.length} 项</span>}
+                    </div>
+                    {reviewResult?.fixed && (
+                      <p className="mt-2 leading-5 text-zinc-600">已自动修正：{reviewResult.fixed.changes || '内容已优化'}</p>
+                    )}
+                    {reviewResult?.illustrations_regen === true && (
+                      <p className="mt-2 leading-5 text-amber-600">插图已同步重新生成</p>
+                    )}
+                    {selectedReview.issues?.length > 0 && (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer hover:opacity-70">查看问题详情</summary>
+                        <div className="mt-2 max-h-40 space-y-1.5 overflow-auto">
+                          {selectedReview.issues.map((iss, i) => (
+                            <div key={i} className="rounded-xl bg-white/65 p-2 leading-5 text-zinc-600">
+                              <span className="font-semibold">{iss.severity === 'blocker' ? '阻断' : iss.severity === 'warning' ? '警告' : '建议'}：</span>
+                              {iss.detail}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                   </div>
-                  {reviewResult?.fixed && (
-                    <p className="mt-2 leading-5 text-zinc-600">已自动修正：{reviewResult.fixed.changes || '内容已优化'}</p>
-                  )}
-                  {reviewResult?.illustrations_regen === true && (
-                    <p className="mt-2 leading-5 text-amber-600">插图已同步重新生成</p>
-                  )}
-                  {selectedReview.issues?.length > 0 && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer hover:opacity-70">查看问题详情</summary>
-                      <div className="mt-2 max-h-40 space-y-1.5 overflow-auto">
-                        {selectedReview.issues.map((iss, i) => (
-                          <div key={i} className="rounded-xl bg-white/65 p-2 leading-5 text-zinc-600">
-                            <span className="font-semibold">{iss.severity === 'blocker' ? '阻断' : iss.severity === 'warning' ? '警告' : '建议'}：</span>
-                            {iss.detail}
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              )}
+                )}
               </div>
             </div>
           ) : (

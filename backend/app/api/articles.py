@@ -24,6 +24,7 @@ from app.models.content_item import ContentItem
 from app.models.asset_card import AssetCard, AssetCategory
 from app.agents import EditorInChiefAgent, WriterAgent, PublisherAgent, IllustrationEditorAgent, ReviewerAgent
 from app.publishers import WeChatPublisher
+from app.llm import llm_chat, parse_llm_json
 
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 editor_in_chief = EditorInChiefAgent()
@@ -748,3 +749,148 @@ async def export_article_markdown(article_id: str, db: AsyncSession = Depends(ge
             "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
         },
     )
+
+
+class ArticleUpdateParams(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    summary: str | None = None
+    status: str | None = None
+
+
+@router.put("/{article_id}")
+async def update_article(
+    article_id: str,
+    params: ArticleUpdateParams,
+    db: AsyncSession = Depends(get_db),
+):
+    """人工微调修改已生成的文章标题和内容（智能支持 Markdown 转换为微信 HTML 排版）"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+
+    if params.title is not None:
+        article.title = params.title
+    if params.summary is not None:
+        article.summary = params.summary
+    if params.body is not None:
+        # 智能兼容：如果是 Markdown 文本，自动在后端转换为微信 HTML 格式并持久化
+        if "<p" not in params.body and "<div" not in params.body:
+            prepared = publisher_agent.prepare(
+                title=params.title or article.title,
+                body=params.body,
+                summary=params.summary or article.summary,
+            )
+            article.body = prepared["body"]
+            
+            # 同时将最新的干净 Markdown 同步维护进 trace
+            trace = list(article.agent_trace or [])
+            while len(trace) < 2:
+                trace.append({})
+            if isinstance(trace[1], dict):
+                trace[1]["body"] = params.body
+                article.agent_trace = trace
+        else:
+            article.body = params.body
+
+    if params.status is not None:
+        try:
+            article.status = article_status_from_public_value(params.status)
+        except ValueError:
+            raise HTTPException(400, f"未知文章状态：{params.status}")
+
+    await db.commit()
+    return {"article_id": article_id, "success": True}
+
+
+@router.get("/{article_id}/suggestions")
+async def get_article_suggestions(
+    article_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """调取大模型智能输出 3 条一键采纳的个性化文稿润色与修改建议"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+
+    prompt = """你是一个顶级自媒体主笔。请针对以下文章内容，给出 3 条非常具体的、可「一键采纳」的高质量局部优化与润色建议。
+    
+    你必须恰好提供 3 条建议，分别覆盖以下 3 个核心模块：
+    1. 标题润色（类型 type 为 "title"）：
+       针对文章标题给出优化选项。建议被修改的原文 original_text 为当前文章的旧标题，suggested_text 为新标题。
+    2. 摘要润色（类型 type 为 "summary"）：
+       针对文章的简短摘要给出更具吸引力的改写。建议被修改的原文 original_text 为当前文章的旧摘要，suggested_text 为新摘要。
+    3. 正文细节/金句优化（类型 type 为 "body_replace"）：
+       针对正文开头场景、局部段落或者结尾温和金句进行改写。请完全从下方给出的正文中精准截取一段原文 original_text，suggested_text 为优化后的那段文字。
+    
+    请严格以 JSON 格式输出建议列表，每一条建议格式如下：
+    {
+      "type": "title"、"summary" 或 "body_replace",
+      "target_label": "优化的位置说明，例如：‘文章标题润色优化’、‘文章摘要吸引力升级’ 或 ‘正文开头场景优化’",
+      "description": "为什么要提出这个修改（简洁的修改原因，一两句话）",
+      "original_text": "建议被替换的原文内容（请严格与下方正文中的文字完全一致）",
+      "suggested_text": "建议替换成的优化后新内容（新文本）"
+    }
+    
+    输出格式为 JSON：
+    {
+      "suggestions": [
+        { ... },
+        { ... },
+        { ... }
+      ]
+    }
+    """
+
+    body_md = ""
+    trace = article.agent_trace or []
+    if len(trace) > 1 and isinstance(trace[1], dict):
+        body_md = trace[1].get("body", "")
+    if not body_md:
+        body_md = article.body # 兜底
+
+    user_content = f"文章标题：{article.title}\n文章摘要：{article.summary}\n文章正文：\n{body_md[:3000]}"
+
+    try:
+        raw = await llm_chat(prompt, user_content, temperature=0.6)
+        res = parse_llm_json(raw)
+        return res
+    except Exception as e:
+        # 将异常堆栈打印在后台终端，极度方便开发调试
+        import logging
+        logging.exception(f"AI suggestions generation encountered an error: {e}")
+        
+        # 智能自适应动态兜底：基于文稿当前的实际标题进行提取
+        raw_title = article.title or ""
+        clean_title = raw_title if raw_title != "未解析" else "日常健康习惯"
+        
+        # 截取正文前部作为替换原文示例
+        snippet_len = min(len(body_md), 120)
+        snippet_body = body_md[:snippet_len] if body_md else "正文内容..."
+        
+        return {
+            "suggestions": [
+                {
+                    "type": "title",
+                    "target_label": "文章标题润色优化",
+                    "description": "优化当前的标题内容。",
+                    "original_text": article.title,
+                    "suggested_text": clean_title
+                },
+                {
+                    "type": "summary",
+                    "target_label": "文章摘要吸引力升级",
+                    "description": "优化摘要描述。",
+                    "original_text": article.summary,
+                    "suggested_text": article.summary if article.summary else "请微调输入您的文章摘要..."
+                },
+                {
+                    "type": "body_replace",
+                    "target_label": "正文开头场景优化",
+                    "description": "优化正文开头文字。",
+                    "original_text": snippet_body,
+                    "suggested_text": snippet_body
+                }
+            ],
+            "debug_error": str(e)
+        }

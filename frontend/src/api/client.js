@@ -56,6 +56,8 @@ export const api = {
   generateIllustrations: (id) => request(`/articles/${id}/illustrations`, { method: 'POST' }),
   reviewArticle: (id) => request(`/articles/${id}/review`, { method: 'POST' }),
   deleteArticle: (id) => request(`/articles/${id}`, { method: 'DELETE' }),
+  updateArticle: (id, data) => request(`/articles/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  getArticleSuggestions: (id) => request(`/articles/${id}/suggestions`),
 
   // Stats & Dashboard
   getArticleStats: () => request('/articles/stats'),

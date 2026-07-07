@@ -87,7 +87,43 @@ class WriterAgent:
         return self._parse_result(result)
 
     def _parse_result(self, raw: str) -> dict:
+        import re
         try:
             return parse_llm_json(raw)
         except Exception:
-            return {"title": "未解析", "body": raw, "summary": ""}
+            title = "未解析"
+            body = raw
+            summary = ""
+            
+            # 1. 尝试使用正则抽取 "title" 字段值
+            title_match = re.search(r'"title"\s*:\s*"([^"]+)"', raw)
+            if title_match:
+                title = title_match.group(1)
+            else:
+                # 若无 title 字段，尝试提取第一行非空文字作为标题
+                lines = [l.strip() for l in raw.splitlines() if l.strip()]
+                for line in lines:
+                    clean_line = re.sub(r'^(#+\s*|```json\s*|{\s*)', '', line).strip()
+                    clean_line = re.sub(r'["\',]$', '', clean_line).strip()
+                    if clean_line and clean_line.lower() != "title" and len(clean_line) < 120:
+                        title = clean_line
+                        break
+            
+            # 2. 尝试从损坏的 JSON 结构中正则截取 "body" 字段内容
+            body_match = re.search(r'"body"\s*:\s*"([\s\S]+?)"\s*,\s*"summary"', raw)
+            if body_match:
+                body = body_match.group(1)
+            else:
+                body_match_alt = re.search(r'"body"\s*:\s*"([\s\S]+?)"\s*}', raw)
+                if body_match_alt:
+                    body = body_match_alt.group(1)
+            
+            # 处理转义的换行和引号
+            body = body.replace("\\n", "\n").replace('\\"', '"').replace('\\t', '\t')
+            
+            # 3. 尝试抽取摘要
+            summary_match = re.search(r'"summary"\s*:\s*"([^"]+)"', raw)
+            if summary_match:
+                summary = summary_match.group(1)
+                
+            return {"title": title, "body": body, "summary": summary}
