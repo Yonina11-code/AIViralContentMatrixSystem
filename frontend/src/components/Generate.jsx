@@ -300,6 +300,31 @@ export default function Generate() {
                     placeholder="请输入您对这篇文章的侧重点要求（例如：重点分析为什么吃无糖饮料依然会腹胀，用风趣幽默的文风来科普，字数 1500 字左右）..."
                     className="control w-full p-3 text-xs h-20 resize-none placeholder:text-zinc-300 focus:ring-blue-500/10 focus:border-blue-300"
                   />
+                  
+                  {/* 预设侧重标签推荐 */}
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                    <span className="text-[10px] text-zinc-400 font-semibold select-none">快速添加侧重：</span>
+                    {['幽默风趣', '专业严谨', '直击要害', '简洁明了', '生活场景切入'].map(tag => (
+                      <button
+                        key={tag}
+                        type="button"
+                        disabled={generating}
+                        onClick={() => {
+                          setFocus(prev => {
+                            const trimmed = prev.trim()
+                            if (!trimmed) return tag
+                            if (trimmed.endsWith('，') || trimmed.endsWith(',') || trimmed.endsWith('。') || trimmed.endsWith('.')) {
+                              return `${trimmed}${tag}`
+                            }
+                            return `${trimmed}，${tag}`
+                          })
+                        }}
+                        className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-white hover:bg-blue-50/70 hover:text-blue-600 hover:border-blue-200 border border-zinc-200 text-zinc-600 active:scale-[0.96] transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                      >
+                        + {tag}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
