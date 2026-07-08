@@ -7,6 +7,170 @@ function latestReviewTrace(article) {
   return trace.second_review || trace.review || null
 }
 
+// 自动将封面图插入到 Markdown 最顶部
+function insertCoverToMarkdown(markdownText, imageUrl) {
+  if (!markdownText || !imageUrl) return markdownText
+  if (markdownText.includes(imageUrl)) return markdownText
+  
+  return `![封面配图](${imageUrl})\n\n` + markdownText
+}
+
+// 自动寻找小标题并在其下方插入插图配图
+function insertImageToMarkdown(markdownText, sectionTitle, imageUrl) {
+  if (!markdownText || !sectionTitle || !imageUrl) return markdownText
+  if (markdownText.includes(imageUrl)) return markdownText
+
+  const imgMarkdown = `\n\n![插图](${imageUrl})\n\n`
+  const escapedTitle = sectionTitle.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+  const regex = new RegExp(`(#{1,6}\\s*\\*\\*?|\\*\\*?|##?\\s+)?${escapedTitle}(\\*\\*?)?`, 'i')
+
+  const match = markdownText.match(regex)
+  if (match) {
+    const matchIndex = match.index + match[0].length
+    const before = markdownText.substring(0, matchIndex)
+    const after = markdownText.substring(matchIndex)
+    return before + imgMarkdown + after
+  }
+
+  return markdownText + `\n\n${imgMarkdown}`
+}
+
+// 自动寻找小标题并在其下方插入插图占位符
+function insertPromptPlaceholderToMarkdown(markdownText, sectionTitle, placeholder) {
+  if (!markdownText || !sectionTitle || !placeholder) return markdownText
+  if (markdownText.includes(placeholder)) return markdownText
+
+  const escapedTitle = sectionTitle.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+  const regex = new RegExp(`(#{1,6}\\s*\\*\\*?|\\*\\*?|##?\\s+)?${escapedTitle}(\\*\\*?)?`, 'i')
+
+  const match = markdownText.match(regex)
+  if (match) {
+    const matchIndex = match.index + match[0].length
+    const before = markdownText.substring(0, matchIndex)
+    const after = markdownText.substring(matchIndex)
+    return before + `\n\n${placeholder}\n\n` + after
+  }
+
+  return markdownText + `\n\n${placeholder}\n\n`
+}
+
+// 自动将封面图占位符插入到 Markdown 最顶端
+function insertCoverPlaceholderToMarkdown(markdownText, placeholder) {
+  if (!markdownText || !placeholder) return markdownText
+  if (markdownText.includes(placeholder)) return markdownText
+  return `${placeholder}\n\n` + markdownText
+}
+
+// 精准正则替换正文里的封面图占位符
+function replaceCoverPlaceholder(markdownText, imageUrl) {
+  const regex = /> \*\*\[待生成封面图 Prompt\]\*\*：[\s\S]*?(?=\n\n|$)/
+  if (regex.test(markdownText)) {
+    return markdownText.replace(regex, `![封面配图](${imageUrl})`)
+  }
+  return insertCoverToMarkdown(markdownText, imageUrl)
+}
+
+// 精准正则替换正文中第 index + 1 张插图占位符
+function replaceIllustrationPlaceholder(markdownText, index, imageUrl, sectionTitle) {
+  const regex = new RegExp(`> \\*\\*\\[待生成插图 ${index + 1} Prompt\\]\\*\\*：[\\s\\S]*?(?=\\n\\n|$)`)
+  if (regex.test(markdownText)) {
+    return markdownText.replace(regex, `![插图](${imageUrl})`)
+  }
+  return insertImageToMarkdown(markdownText, sectionTitle, imageUrl)
+}
+
+// 兼容非安全上下文（非 HTTPS / 局域网 IP）的剪贴板复制兜底方案
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text)
+  }
+  const textArea = document.createElement('textarea')
+  textArea.value = text
+  textArea.style.position = 'fixed'
+  textArea.style.top = '0'
+  textArea.style.left = '0'
+  textArea.style.opacity = '0'
+  document.body.appendChild(textArea)
+  textArea.focus()
+  textArea.select()
+  try {
+    const successful = document.execCommand('copy')
+    document.body.removeChild(textArea)
+    return successful ? Promise.resolve() : Promise.reject(new Error('Fallback copy failed'))
+  } catch (err) {
+    document.body.removeChild(textArea)
+    return Promise.reject(err)
+  }
+}
+
+function PromptBlock({ title, prompt, tone = 'zinc', imageUrl = '', onUpload }) {
+  const [copied, setCopied] = useState(false)
+  const [uploading, setUploading] = useState(false)
+
+  const handleCopy = () => {
+    if (!prompt) return
+    copyToClipboard(prompt)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1400)
+      })
+      .catch((err) => {
+        console.error('复制失败', err)
+        alert('复制失败，请手动选择复制')
+      })
+  }
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!onUpload) return
+    setUploading(true)
+    try {
+      const res = await api.uploadImage(file)
+      if (res.success && res.url) {
+        await onUpload(res.url)
+      } else {
+        alert('配图上传失败')
+      }
+    } catch (err) {
+      alert('配图上传失败: ' + err.message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  return (
+    <div className={`rounded-2xl border p-4 ${tone === 'blue' ? 'border-blue-100 bg-blue-50/60' : 'border-zinc-100 bg-zinc-50'}`}>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className={`text-xs font-semibold ${tone === 'blue' ? 'text-blue-800' : 'text-zinc-700'}`}>{title}</span>
+        <div className="flex items-center gap-2">
+          {onUpload && (
+            <label className="btn-secondary h-8 px-3 text-[11px] flex items-center justify-center cursor-pointer select-none">
+              {uploading ? '上传中...' : '上传配图'}
+              <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" disabled={uploading} />
+            </label>
+          )}
+          <button onClick={handleCopy} className="btn-secondary h-8 px-3 text-[11px]">
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
+      </div>
+      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700">{prompt}</p>
+
+      {imageUrl && (
+        <div className="mt-4 border-t border-zinc-100/60 pt-4 flex flex-col items-center">
+          <p className="text-[10px] text-zinc-400 mb-2 self-start">已关联的 MJ 配图：</p>
+          <img 
+            src={imageUrl} 
+            alt={`${title}配图`} 
+            className="max-h-72 rounded-xl object-contain border border-zinc-200/50 shadow-sm"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Articles() {
   const [articles, setArticles] = useState([])
   const [loading, setLoading] = useState(false)
@@ -154,7 +318,55 @@ export default function Articles() {
       setEditTitle(art.title || '')
       
       // 优先从总编写作 trace 提取干净的 Markdown 原文以摆脱 HTML style 的污染
-      const cleanMarkdown = art.agent_trace?.[1]?.body || art.body || ''
+      let cleanMarkdown = art.agent_trace?.[1]?.body || art.body || ''
+      
+      // 健壮性兼容：若 cleanMarkdown 是未被成功解析的原始 JSON 字符串，尝试从中抽取真实的正文
+      if (typeof cleanMarkdown === 'string') {
+        const trimmed = cleanMarkdown.trim()
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(trimmed)
+            if (parsed && parsed.body) {
+              cleanMarkdown = parsed.body
+            }
+          } catch (e) {
+            // 若 JSON.parse 因不规范字符报错，尝试用正则精准提取
+            const bodyMatch = trimmed.match(/"body"\s*:\s*"([\s\S]+?)"\s*(,\s*"summary"|})/);
+            if (bodyMatch && bodyMatch[1]) {
+              cleanMarkdown = bodyMatch[1]
+                .replace(/\\n/g, '\n')
+                .replace(/\\"/g, '"')
+                .replace(/\\t/g, '\t')
+            }
+          }
+        }
+      }
+      
+      // 智能占位符生成与图片嵌入
+      const imgs = art.agent_trace?.[2]
+      if (imgs) {
+        if (imgs.illustrations) {
+          imgs.illustrations.forEach((ill, idx) => {
+            if (ill.section_title) {
+              if (ill.image_url) {
+                cleanMarkdown = insertImageToMarkdown(cleanMarkdown, ill.section_title, ill.image_url)
+              } else {
+                const promptPlaceholder = `> **[待生成插图 ${idx + 1} Prompt]**：${ill.prompt || ''}`
+                cleanMarkdown = insertPromptPlaceholderToMarkdown(cleanMarkdown, ill.section_title, promptPlaceholder)
+              }
+            }
+          })
+        }
+        if (imgs.cover) {
+          if (imgs.cover.image_url) {
+            cleanMarkdown = insertCoverToMarkdown(cleanMarkdown, imgs.cover.image_url)
+          } else {
+            const coverPlaceholder = `> **[待生成封面图 Prompt]**：${imgs.cover.prompt || ''}`
+            cleanMarkdown = insertCoverPlaceholderToMarkdown(cleanMarkdown, coverPlaceholder)
+          }
+        }
+      }
+
       setEditBody(cleanMarkdown)
       setEditSummary(art.summary || '')
       setIsEditing(true)
@@ -311,9 +523,59 @@ export default function Articles() {
     setViewingFull(false)
   }
 
-  const copyPrompt = (prompt) => {
-    if (prompt) navigator.clipboard?.writeText(prompt)
+  const refreshFullArticle = async () => {
+    if (!selectedArticle) return
+    try {
+      const data = await api.getArticle(selectedArticle.id)
+      setFullArticle(data.article || data)
+    } catch (err) {
+      console.error(err)
+    }
   }
+
+  const handleUploadCover = async (url) => {
+    await api.saveIllustrationImage(selectedArticle.id, 'cover', url)
+    if (isEditing) {
+      const newMarkdown = replaceCoverPlaceholder(editBody, url)
+      setEditBody(newMarkdown)
+    } else {
+      const currentMarkdown = fullArticle?.agent_trace?.[1]?.body || ''
+      if (currentMarkdown) {
+        const newMarkdown = replaceCoverPlaceholder(currentMarkdown, url)
+        await api.updateArticle(selectedArticle.id, {
+          title: fullArticle.title,
+          summary: fullArticle.summary,
+          body: newMarkdown
+        })
+      }
+    }
+    await refreshFullArticle()
+  }
+
+  const handleUploadIllustration = async (index, url) => {
+    await api.saveIllustrationImage(selectedArticle.id, String(index), url)
+    const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
+    const ill = imgs?.illustrations?.[index]
+    if (isEditing) {
+      if (ill && ill.section_title) {
+        const newMarkdown = replaceIllustrationPlaceholder(editBody, index, url, ill.section_title)
+        setEditBody(newMarkdown)
+      }
+    } else {
+      const currentMarkdown = fullArticle?.agent_trace?.[1]?.body || ''
+      if (currentMarkdown && ill && ill.section_title) {
+        const newMarkdown = replaceIllustrationPlaceholder(currentMarkdown, index, url, ill.section_title)
+        await api.updateArticle(selectedArticle.id, {
+          title: fullArticle.title,
+          summary: fullArticle.summary,
+          body: newMarkdown
+        })
+      }
+    }
+    await refreshFullArticle()
+  }
+
+  // 已使用 PromptBlock 统一处理复制，移除旧 copyPrompt
 
   const promptText = (item) => item?.copy_prompt || item?.prompt || ''
   const selectedReview = reviewResult || latestReviewTrace(selectedArticle)
@@ -476,6 +738,36 @@ export default function Articles() {
                 placeholder="在此修改您的 Markdown 正文..."
               />
             </div>
+
+            {/* 插图 Prompts (微调修改状态下的配图归档与自动插入) */}
+            {(() => {
+              const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
+              if (!imgs || !imgs.cover) return null
+              return (
+                <div className="mt-8 border-t border-zinc-100 pt-6">
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-3">插图 Prompts 及其配图</h3>
+                  <p className="text-xs text-zinc-400 mb-4">您可以直接在下方选择 MJ 生成好的配图上传，配图将全自动定位并实时插入到上方的“文章正文”输入框中。</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <PromptBlock
+                      title="封面图 Prompt"
+                      prompt={promptText(imgs.cover)}
+                      tone="blue"
+                      imageUrl={imgs.cover.image_url}
+                      onUpload={handleUploadCover}
+                    />
+                    {imgs.illustrations?.map((ill, i) => (
+                      <PromptBlock
+                        key={i}
+                        title={`插图 ${i + 1}${ill.section_title ? `：${ill.section_title}` : ''}`}
+                        prompt={promptText(ill)}
+                        imageUrl={ill.image_url}
+                        onUpload={(url) => handleUploadIllustration(i, url)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
           </div>
           
           <div className="flex items-center gap-3 pt-4 border-t border-zinc-100 justify-end">
@@ -538,33 +830,25 @@ export default function Articles() {
             return (
               <div className="mt-10 border-t border-zinc-100 pt-6">
                 <h3 className="text-sm font-semibold text-zinc-900 mb-4">插图 Prompts</h3>
-                <p className="text-xs text-zinc-400 mb-4">复制以下 prompt 到 Midjourney / DALL·E / Stable Diffusion 生成配图</p>
-                <div className="mb-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <span className="text-xs font-semibold text-blue-800">封面图 Prompt</span>
-                    <button
-                      onClick={() => copyPrompt(promptText(imgs.cover))}
-                      className="btn-secondary h-8 px-3 text-[11px]"
-                    >
-                      复制
-                    </button>
-                  </div>
-                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">{promptText(imgs.cover)}</p>
+                <p className="text-xs text-zinc-400 mb-4">复制以下 prompt 到 Midjourney / DALL·E / Stable Diffusion 生成配图，并可以上传归档配图</p>
+                <div className="space-y-3">
+                  <PromptBlock
+                    title="封面图 Prompt"
+                    prompt={promptText(imgs.cover)}
+                    tone="blue"
+                    imageUrl={imgs.cover.image_url}
+                    onUpload={handleUploadCover}
+                  />
+                  {imgs.illustrations?.map((ill, i) => (
+                    <PromptBlock
+                      key={i}
+                      title={`插图 ${i + 1}${ill.section_title ? `：${ill.section_title}` : ''}`}
+                      prompt={promptText(ill)}
+                      imageUrl={ill.image_url}
+                      onUpload={(url) => handleUploadIllustration(i, url)}
+                    />
+                  ))}
                 </div>
-                {imgs.illustrations?.map((ill, i) => (
-                  <div key={i} className="mb-3 rounded-2xl border border-zinc-100 bg-zinc-50 p-4">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <span className="text-xs font-semibold text-zinc-700">插图 {i+1}{ill.section_title ? `：${ill.section_title}` : ''}</span>
-                      <button
-                        onClick={() => copyPrompt(promptText(ill))}
-                        className="btn-secondary h-8 px-3 text-[11px]"
-                      >
-                        复制
-                      </button>
-                    </div>
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-700">{promptText(ill)}</p>
-                  </div>
-                ))}
               </div>
             )
           })()}

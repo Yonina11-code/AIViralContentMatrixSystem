@@ -24,14 +24,44 @@ function getStepIndex(seconds) {
   return 4
 }
 
+// 兼容非安全上下文（非 HTTPS / 局域网 IP）的剪贴板复制兜底方案
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text)
+  }
+  const textArea = document.createElement('textarea')
+  textArea.value = text
+  textArea.style.position = 'fixed'
+  textArea.style.top = '0'
+  textArea.style.left = '0'
+  textArea.style.opacity = '0'
+  document.body.appendChild(textArea)
+  textArea.focus()
+  textArea.select()
+  try {
+    const successful = document.execCommand('copy')
+    document.body.removeChild(textArea)
+    return successful ? Promise.resolve() : Promise.reject(new Error('Fallback copy failed'))
+  } catch (err) {
+    document.body.removeChild(textArea)
+    return Promise.reject(err)
+  }
+}
+
 function PromptBlock({ title, prompt, tone = 'zinc' }) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = () => {
     if (!prompt) return
-    navigator.clipboard?.writeText(prompt)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1400)
+    copyToClipboard(prompt)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1400)
+      })
+      .catch((err) => {
+        console.error('复制失败', err)
+        alert('复制失败，请手动选择复制')
+      })
   }
 
   return (

@@ -657,23 +657,31 @@ def _build_markdown_export(article: Article) -> str:
     lines.append(article.body)
     lines.append("")
 
-    # ── 插图 prompt ──
+    # ── 插图 prompt 与配图 ──
     trace = article.agent_trace or []
     if len(trace) > 2 and trace[2] and trace[2].get("cover"):
         illus = trace[2]
         lines.append("---")
-        lines.append("## 🎨 插图 Prompt")
+        lines.append("## 🎨 插图 Prompt 与实际配图")
         lines.append("")
 
         lines.append("### 封面图")
         lines.append("")
-        lines.append(illus["cover"].get("copy_prompt") or illus["cover"].get("prompt", ""))
+        if illus["cover"].get("image_url"):
+            cover_filename = os.path.basename(illus["cover"]["image_url"])
+            lines.append(f"![封面配图](images/{cover_filename})")
+            lines.append("")
+        lines.append(f"**提示词**：{illus['cover'].get('copy_prompt') or illus['cover'].get('prompt', '')}")
         lines.append("")
 
         for i, ill in enumerate(illus.get("illustrations", []), 1):
             lines.append(f"### 内文插图 {i}：{ill.get('section_title', '')}")
             lines.append("")
-            lines.append(ill.get("copy_prompt") or ill.get("prompt", ""))
+            if ill.get("image_url"):
+                ill_filename = os.path.basename(ill["image_url"])
+                lines.append(f"![内文配图 {i}](images/{ill_filename})")
+                lines.append("")
+            lines.append(f"**提示词**：{ill.get('copy_prompt') or ill.get('prompt', '')}")
             lines.append("")
 
     # ── 审核建议 ──
@@ -732,24 +740,132 @@ def _build_markdown_export(article: Article) -> str:
     return "\n".join(lines)
 
 
+@router.post("/{article_id}/illustrations/upload")
+async def upload_article_illustration_association(
+    article_id: str,
+    params: IllustrationUploadParams,
+    db: AsyncSession = Depends(get_db),
+):
+    """保存用户上传的 Midjourney 配图关联关系到文章的 agent_trace 中"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+
+    trace = list(article.agent_trace or [])
+    while len(trace) < 3:
+        trace.append({})
+
+    if not isinstance(trace[2], dict):
+        trace[2] = {}
+
+    illus = dict(trace[2])
+
+    if params.type == "cover":
+        if "cover" not in illus or not isinstance(illus["cover"], dict):
+            illus["cover"] = {}
+        illus["cover"] = dict(illus["cover"])
+        illus["cover"]["image_url"] = params.image_url
+    else:
+        try:
+            idx = int(params.type)
+            if "illustrations" in illus and isinstance(illus["illustrations"], list):
+                if 0 <= idx < len(illus["illustrations"]):
+                    # 深度复制更新字典
+                    illus["illustrations"] = list(illus["illustrations"])
+                    target = dict(illus["illustrations"][idx])
+                    target["image_url"] = params.image_url
+                    illus["illustrations"][idx] = target
+        except (ValueError, IndexError):
+            raise HTTPException(400, f"无效的插图标识或索引：{params.type}")
+
+    trace[2] = illus
+    article.agent_trace = trace
+
+    # 强行标记变更以确保 SQLAlchemy 能够识别变更
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(article, "agent_trace")
+
+    await db.commit()
+    return {"success": True, "image_url": params.image_url}
+
+
 @router.get("/{article_id}/export")
 async def export_article_markdown(article_id: str, db: AsyncSession = Depends(get_db)):
-    """导出文章为 Markdown 文件下载"""
+    """导出文章为 Markdown（若存在已上传插图配图，则自动打包为 ZIP 压缩包下载）"""
     article = await db.get(Article, article_id)
     if not article:
         raise HTTPException(404, "文章不存在")
 
     md_content = _build_markdown_export(article)
-    filename = f"{article.title.replace('/', '_').replace(' ', '_')[:50]}.md"
 
-    return Response(
-        content=md_content,
-        media_type="text/markdown; charset=utf-8",
-        headers={
-            "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
-        },
+    import re
+    import io
+    import os
+    from urllib.parse import quote
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    # 1. 扫描文章正文中的本地相对路径图片
+    image_names = set(re.findall(r'/static/images/([a-zA-Z0-9\.-]+\.(?:png|jpg|jpeg|gif|webp))', md_content, re.IGNORECASE))
+
+    # 2. 扫描 agent_trace 中显式挂载的配图
+    trace = article.agent_trace or []
+    if len(trace) > 2 and trace[2] and isinstance(trace[2], dict):
+        illus = trace[2]
+        if illus.get("cover") and illus["cover"].get("image_url"):
+            image_names.add(os.path.basename(illus["cover"]["image_url"]))
+        for ill in illus.get("illustrations", []):
+            if ill.get("image_url"):
+                image_names.add(os.path.basename(ill["image_url"]))
+
+    # 如果没有任何关联图片，直接返回纯 Markdown 以保持向下兼容
+    if not image_names:
+        filename = f"{article.title.replace('/', '_').replace(' ', '_')[:50]}.md"
+        return Response(
+            content=md_content,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}",
+            },
+        )
+
+    # 包含图片，开始打包 ZIP 内存字节流
+    static_images_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+        "static", 
+        "images"
     )
 
+    # 替换 Markdown 正文里图片引用为解压后的本地相对路径目录 images/
+    md_content_fixed = re.sub(r'/static/images/', 'images/', md_content)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        # 写入 README.md
+        article_filename = f"{article.title.replace('/', '_').replace(' ', '_')[:50]}.md"
+        zip_file.writestr(article_filename, md_content_fixed)
+
+        # 写入图片文件
+        for img_name in image_names:
+            local_path = os.path.join(static_images_dir, img_name)
+            if os.path.exists(local_path):
+                zip_file.write(local_path, f"images/{img_name}")
+
+    zip_buffer.seek(0)
+    zip_filename = f"{article.title.replace('/', '_').replace(' ', '_')[:50]}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{quote(zip_filename)}",
+        }
+    )
+
+
+class IllustrationUploadParams(BaseModel):
+    type: str  # "cover" 或者索引数字如 "0", "1"
+    image_url: str
 
 class ArticleUpdateParams(BaseModel):
     title: str | None = None

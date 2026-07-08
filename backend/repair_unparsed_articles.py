@@ -55,6 +55,20 @@ async def repair():
                     article.title = prepared["title"]
                     article.body = prepared["body"]
                     article.summary = prepared["summary"]
+                    
+                    # 顺便同步修复 agent_trace，防止前端编辑时加载出原始未解析的 JSON 串
+                    trace = list(article.agent_trace or [])
+                    if len(trace) > 1 and isinstance(trace[1], dict):
+                        written_repaired = dict(trace[1])
+                        written_repaired["title"] = title
+                        written_repaired["body"] = raw_body
+                        written_repaired["summary"] = summary
+                        trace[1] = written_repaired
+                        article.agent_trace = trace
+                        
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(article, "agent_trace")
+                        
                     # 更新状态为 DRAFT 草稿状态
                     article.status = ArticleStatus.DRAFT
                     

@@ -29,6 +29,13 @@ class PublisherAgent:
         }
 
     def _markdown_to_wechat_html(self, markdown_text: str) -> str:
+        # 清除未上传图片的占位符行，避免输出到微信 HTML 板式
+        markdown_text = re.sub(
+            r'(?:>\s*)?\*\*\[待生成(?:封面图|插图 \d+) Prompt\]\*\*：[\s\S]*?(?:\n\n|$)',
+            '',
+            markdown_text
+        )
+
         # 先预处理代码块（微信不支持 pre/code）
         code_blocks = []
         def save_code(m):

@@ -75,6 +75,11 @@ export const api = {
     }
     return res.json()
   },
+  saveIllustrationImage: (id, type, imageUrl) =>
+    request(`/articles/${id}/illustrations/upload`, {
+      method: 'POST',
+      body: JSON.stringify({ type, image_url: imageUrl }),
+    }),
 
   // Stats & Dashboard
   getArticleStats: () => request('/articles/stats'),
