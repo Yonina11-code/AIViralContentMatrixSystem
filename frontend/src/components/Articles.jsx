@@ -79,6 +79,60 @@ function replaceIllustrationPlaceholder(markdownText, index, imageUrl, sectionTi
   return insertImageToMarkdown(markdownText, sectionTitle, imageUrl)
 }
 
+// 简易 Markdown 解析器，用于右侧微信排版所见即所得实时效果渲染
+function renderMarkdownToHtml(markdownText) {
+  if (!markdownText) return '';
+  let html = markdownText;
+  
+  // 1. 转义 HTML 字符防注入
+  html = html
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+    
+  // 2. 解析图片语法 ![alt](url) -> 插入精美的微信卡片图片
+  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, (match, alt, url) => {
+    return `
+      <div class="my-4 text-center group relative w-full block">
+        <img src="${url}" alt="${alt}" class="max-h-72 rounded-xl object-contain border border-zinc-200 shadow-sm mx-auto transition-transform duration-200 hover:scale-[1.01]" />
+        <p class="text-[10px] text-zinc-400 mt-1.5">${alt || '配图'}</p>
+      </div>
+    `;
+  });
+  
+  // 3. 解析标题 ###, ##, # -> 转换为微信公众号级别的段落标题样式
+  html = html.replace(/^(#{1,6})\s+(.+)$/gm, (match, hashes, text) => {
+    const level = hashes.length;
+    const size = level === 1 ? '19px' : level === 2 ? '17px' : '15px';
+    return `<p style="margin:28px 0 12px;padding-top:4px;font-size:${size};font-weight:700;color:#18181b;line-height:1.55;border-left:4px solid #3b82f6;padding-left:8px;">${text}</p>`;
+  });
+  
+  // 4. 解析粗体 **text**
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  // 5. 处理待生成提示行以弱化展示
+  html = html.replace(/&gt;\s*\*\*\[待生成(?:封面图|插图\s+\d+)\s+Prompt\]\*\*(.+)$/gm, (match, body) => {
+    return `<div style="background:#f4f4f5;border-left:3px solid #a1a1aa;padding:8px 12px;font-size:11px;color:#71717a;border-radius:4px;margin:12px 0;">[待生成占位] ${body}</div>`;
+  });
+  
+  // 6. 解析段落
+  const blocks = html.split(/\n\n+/);
+  const formattedBlocks = blocks.map(block => {
+    const stripped = block.trim();
+    if (!stripped) return '';
+    // 如果已经是图片、标题、待生成占位的块，不做多余段落包裹
+    if (stripped.startsWith('<div') || stripped.startsWith('<p style="margin:28px') || stripped.startsWith('<blockquote') || stripped.startsWith('<hr')) {
+      return stripped;
+    }
+    const textHtml = stripped.replace(/\n/g, '<br/>');
+    return `<p style="margin:12px 0;line-height:1.88;font-size:14px;color:#3f3f46;">${textHtml}</p>`;
+  });
+  
+  return formattedBlocks.join('\n');
+}
+
+
+
 // 兼容非安全上下文（非 HTTPS / 局域网 IP）的剪贴板复制兜底方案
 function copyToClipboard(text) {
   if (navigator.clipboard?.writeText) {
@@ -103,7 +157,7 @@ function copyToClipboard(text) {
   }
 }
 
-function PromptBlock({ title, prompt, tone = 'zinc', imageUrl = '', onUpload }) {
+function PromptBlock({ title, prompt, tone = 'zinc', imageUrl = '', onUpload, onRemove }) {
   const [copied, setCopied] = useState(false)
   const [uploading, setUploading] = useState(false)
 
@@ -159,7 +213,18 @@ function PromptBlock({ title, prompt, tone = 'zinc', imageUrl = '', onUpload }) 
 
       {imageUrl && (
         <div className="mt-4 border-t border-zinc-100/60 pt-4 flex flex-col items-center">
-          <p className="text-[10px] text-zinc-400 mb-2 self-start">已关联的 MJ 配图：</p>
+          <div className="w-full flex items-center justify-between mb-2">
+            <span className="text-[10px] text-zinc-400">已关联的 MJ 配图：</span>
+            {onRemove && (
+              <button 
+                type="button"
+                onClick={onRemove} 
+                className="text-[10px] font-semibold text-red-600 hover:text-red-800 bg-red-50 hover:bg-red-100 px-2 py-1 rounded transition-colors border border-red-200/50"
+              >
+                删除配图
+              </button>
+            )}
+          </div>
           <img 
             src={imageUrl} 
             alt={`${title}配图`} 
@@ -345,7 +410,7 @@ export default function Articles() {
       // 智能占位符生成与图片嵌入
       const imgs = art.agent_trace?.[2]
       if (imgs) {
-        if (imgs.illustrations) {
+        if (Array.isArray(imgs.illustrations)) {
           imgs.illustrations.forEach((ill, idx) => {
             if (ill.section_title) {
               if (ill.image_url) {
@@ -367,6 +432,7 @@ export default function Articles() {
         }
       }
 
+      setFullArticle(art)
       setEditBody(cleanMarkdown)
       setEditSummary(art.summary || '')
       setIsEditing(true)
@@ -575,6 +641,78 @@ export default function Articles() {
     await refreshFullArticle()
   }
 
+  const handleRemoveCover = async () => {
+    await api.saveIllustrationImage(selectedArticle.id, 'cover', '')
+    const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
+    const coverPrompt = imgs?.cover?.prompt || ''
+    const coverPlaceholder = `> **[待生成封面图 Prompt]**：${coverPrompt}`
+
+    if (isEditing) {
+      const targetTag = `![封面配图](${imgs?.cover?.image_url})`
+      let newMarkdown = editBody
+      if (imgs?.cover?.image_url && editBody.includes(targetTag)) {
+        newMarkdown = editBody.replace(targetTag, coverPlaceholder)
+      } else {
+        newMarkdown = insertCoverPlaceholderToMarkdown(editBody, coverPlaceholder)
+      }
+      setEditBody(newMarkdown)
+    } else {
+      const currentMarkdown = fullArticle?.agent_trace?.[1]?.body || ''
+      if (currentMarkdown) {
+        const targetTag = `![封面配图](${imgs?.cover?.image_url})`
+        let newMarkdown = currentMarkdown
+        if (imgs?.cover?.image_url && currentMarkdown.includes(targetTag)) {
+          newMarkdown = currentMarkdown.replace(targetTag, coverPlaceholder)
+        } else {
+          newMarkdown = insertCoverPlaceholderToMarkdown(currentMarkdown, coverPlaceholder)
+        }
+        await api.updateArticle(selectedArticle.id, {
+          title: fullArticle.title,
+          summary: fullArticle.summary,
+          body: newMarkdown
+        })
+      }
+    }
+    await refreshFullArticle()
+  }
+
+  const handleRemoveIllustration = async (index) => {
+    await api.saveIllustrationImage(selectedArticle.id, String(index), '')
+    const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
+    const ill = imgs?.illustrations?.[index]
+    const promptPlaceholder = `> **[待生成插图 ${index + 1} Prompt]**：${ill?.prompt || ''}`
+
+    if (isEditing) {
+      const targetTag = `![插图](${ill?.image_url})`
+      let newMarkdown = editBody
+      if (ill?.image_url && editBody.includes(targetTag)) {
+        newMarkdown = editBody.replace(targetTag, promptPlaceholder)
+      } else {
+        newMarkdown = insertPromptPlaceholderToMarkdown(editBody, ill?.section_title || '', promptPlaceholder)
+      }
+      setEditBody(newMarkdown)
+    } else {
+      const currentMarkdown = fullArticle?.agent_trace?.[1]?.body || ''
+      if (currentMarkdown) {
+        const targetTag = `![插图](${ill?.image_url})`
+        let newMarkdown = currentMarkdown
+        if (ill?.image_url && currentMarkdown.includes(targetTag)) {
+          newMarkdown = currentMarkdown.replace(targetTag, promptPlaceholder)
+        } else {
+          newMarkdown = insertPromptPlaceholderToMarkdown(currentMarkdown, ill?.section_title || '', promptPlaceholder)
+        }
+        await api.updateArticle(selectedArticle.id, {
+          title: fullArticle.title,
+          summary: fullArticle.summary,
+          body: newMarkdown
+        })
+      }
+    }
+    await refreshFullArticle()
+  }
+
+
+
   // 已使用 PromptBlock 统一处理复制，移除旧 copyPrompt
 
   const promptText = (item) => item?.copy_prompt || item?.prompt || ''
@@ -583,7 +721,7 @@ export default function Articles() {
   // 全文编辑视图（独立宽展页面，完美解决狭窄侧边栏排版太小的问题）
   if (isEditing && selectedArticle) {
     return (
-      <div>
+      <div className="max-w-7xl mx-auto px-4 py-6">
         <button
           onClick={() => setIsEditing(false)}
           className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-zinc-600 mb-6 transition-colors group cursor-pointer"
@@ -594,7 +732,11 @@ export default function Articles() {
           返回列表
         </button>
 
-        <div className="surface mx-auto max-w-4xl rounded-[1.5rem] p-6 sm:p-8 space-y-6">
+        {/* 双栏所见即所得大布局 */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          
+          {/* 左栏：编辑与 Prompt 卡片（占 7/12 宽度） */}
+          <div className="lg:col-span-7 bg-white rounded-[1.5rem] p-6 sm:p-8 space-y-6 border border-zinc-200/50 shadow-sm">
           <div className="flex items-center justify-between pb-4 border-b border-zinc-100">
             <div>
               <h2 className="text-xl font-bold text-zinc-900">微调修改文章</h2>
@@ -746,7 +888,7 @@ export default function Articles() {
               return (
                 <div className="mt-8 border-t border-zinc-100 pt-6">
                   <h3 className="text-sm font-semibold text-zinc-900 mb-3">插图 Prompts 及其配图</h3>
-                  <p className="text-xs text-zinc-400 mb-4">您可以直接在下方选择 MJ 生成好的配图上传，配图将全自动定位并实时插入到上方的“文章正文”输入框中。</p>
+                  <p className="text-xs text-zinc-400 mb-4">您可以直接在下方选择 MJ 生成好的配图上传，配图将全自动定位并实时插入到上方的“文章正文”输入框中；点击删除配图可一键还原为占位符。</p>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <PromptBlock
                       title="封面图 Prompt"
@@ -754,6 +896,7 @@ export default function Articles() {
                       tone="blue"
                       imageUrl={imgs.cover.image_url}
                       onUpload={handleUploadCover}
+                      onRemove={handleRemoveCover}
                     />
                     {imgs.illustrations?.map((ill, i) => (
                       <PromptBlock
@@ -762,6 +905,7 @@ export default function Articles() {
                         prompt={promptText(ill)}
                         imageUrl={ill.image_url}
                         onUpload={(url) => handleUploadIllustration(i, url)}
+                        onRemove={() => handleRemoveIllustration(i)}
                       />
                     ))}
                   </div>
@@ -778,6 +922,26 @@ export default function Articles() {
               {saving ? '正在保存修改...' : '确认并保存文章'}
             </button>
           </div>
+          </div>
+
+          {/* 右栏：微信排版效果实时所见即所得预览（占 5/12 宽度，Sticky 滚动吸顶） */}
+          <div className="lg:col-span-5 lg:sticky lg:top-8 bg-zinc-50 border border-zinc-200/60 rounded-[1.5rem] p-6 space-y-4 shadow-sm min-h-[40rem] max-h-[85vh] overflow-y-auto flex flex-col">
+            <div className="border-b border-zinc-200/80 pb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-zinc-900 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse" />
+                  所见即所得效果实时预览
+                </h3>
+                <p className="text-[10px] text-zinc-400 mt-1">编辑时实时查看最终微信文章样式与图片呈现</p>
+              </div>
+            </div>
+            
+            <div 
+              className="flex-1 wechat-preview whitespace-pre-wrap break-words text-sm text-zinc-800 leading-relaxed font-sans overflow-y-auto pr-1"
+              dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(editBody) }}
+            />
+          </div>
+
         </div>
       </div>
     )
