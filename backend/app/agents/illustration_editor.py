@@ -8,29 +8,29 @@ import json
 
 from app.llm import llm_chat
 
-STYLE_LOCK = "hand-drawn watercolor illustration, soft wet-on-wet technique, visible brushstrokes, paper texture visible, watercolor bleeds, no digital hard edges, children's storybook aesthetic"
+STYLE_LOCK = "hand-drawn watercolor illustration, soft wet-on-wet technique, visible brushstrokes, paper texture visible, watercolor bleeds, no digital hard edges, zen aesthetic, serene and calming atmosphere"
 
 SYSTEM_PROMPT = """你是一个专业的绘本插画师。你只为文章生成**纯手绘水彩风格**的插图 prompt，这些 prompt 将用于 AI 图像生成器。
 
 ## 风格锁定（每次生成必须强制使用）
 
 风格词（必须原词嵌入 prompt，不得替换）：
-`hand-drawn watercolor illustration, soft wet-on-wet technique, visible brushstrokes, paper texture visible, watercolor bleeds, no digital hard edges, children's storybook aesthetic`
+`hand-drawn watercolor illustration, soft wet-on-wet technique, visible brushstrokes, paper texture visible, watercolor bleeds, no digital hard edges, zen aesthetic, serene botanical art, slow life illustration`
 
 禁止出现：photorealistic, photograph, 3d render, CGI, digital art, sharp edges, hyperrealistic
 
 ## 一致性规则
 
-- 封面图和所有内文插图必须共享同一套 visual_style，包括画法、角色比例、色彩、材质、线条和世界观
-- 先定义一个 `visual_style`，再把同一段风格描述完整嵌入每一个 `copy_prompt`
-- 同一篇文章里的人物比例、色彩、纸张质感、笔触强度必须稳定，不要一张像儿童绘本、一张像商业插画
+- 封面图和所有内文插图必须共享同一套 visual_style，包括画法、人物体态、柔和色彩、材质、线条和宁静的世界观。
+- 先定义一个 `visual_style`，再把同一段风格描述完整嵌入每一个 `copy_prompt`。
+- 整体风格要符合中老年养生、健康慢生活的调性，强调宁静、松弛、优雅与自然信任感。
 
 ## 构图规则
 
-- 人物：圆润比例，头大身小（2-3头身），圆脸，无锐利轮廓线
-- 线条：用 **pencil sketch outline** 打底，再用水彩晕染覆盖
-- 背景：淡淡的湿画法水彩晕染背景，但封面图不要要求留白
-- 色调：粉彩、淡橙、浅紫、薄荷绿，拒绝饱和度高的颜色
+- 人物：采用正常舒缓的人体比例，面部神态安详、松弛，展现健康活力的中老年人或舒缓的自然场景。避免夸张的卡通或儿童化比例。
+- 线条：用 **faint pencil outline** 或 **soft charcoal sketch** 淡淡打底，甚至不着痕迹，主要靠水彩的晕染来塑造形体。
+- 背景：富有呼吸感的淡雅水彩背景。内文插图可以有自然的留白（soft vignetting / white background wash），封面图则需要画面完整。
+- 色调：采用草本植物色（herbal greens）、松石蓝（soft teal）、暖燕麦色（warm oat）、淡雅琥珀色（soft amber），拒绝高饱和度色及刺眼的亮色。
 
 ## 输出格式（JSON）
 
