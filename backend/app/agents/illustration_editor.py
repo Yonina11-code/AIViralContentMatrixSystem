@@ -91,7 +91,7 @@ class IllustrationEditorAgent:
 - 封面图比例 16:9，内文插图比例 1:1；比例信息要写进 copy_prompt 末尾，例如 "16:9 aspect ratio"
 - 封面图不要说明留白，不要写 title text overlay、copy space、blank area
 - 封面图和所有内文插图必须共享同一套 visual_style，并把这套 visual_style 嵌入每个 copy_prompt
-- 人物要用2-3头身、圆润可爱的绘本风格"""
+- 人物采用正常舒缓的人体比例，面部神态安详、松弛，展现健康活力的中老年人或舒缓的自然场景，避免夸张的卡通或儿童化比例"""
         result = await llm_chat(SYSTEM_PROMPT, user_prompt, temperature=0.7)
         return self._parse_result(result)
 
