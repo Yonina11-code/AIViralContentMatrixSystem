@@ -79,8 +79,81 @@ function replaceIllustrationPlaceholder(markdownText, index, imageUrl, sectionTi
   return insertImageToMarkdown(markdownText, sectionTitle, imageUrl)
 }
 
+// 智能模糊匹配判定
+function isTextFlexibleMatched(text, originalText) {
+  if (!originalText) return false;
+  if (text.includes(originalText)) return true;
+  
+  if (originalText.length > 12) {
+    const start = originalText.substring(0, 8);
+    const end = originalText.substring(originalText.length - 8, originalText.length - 1);
+    const escapeReg = (str) => str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    try {
+      const reg = new RegExp(`${escapeReg(start)}[\\s\\S]{0,60}?${escapeReg(end)}`);
+      if (reg.test(text)) return true;
+    } catch (e) {}
+  }
+  
+  if (originalText.length > 8) {
+    const start = originalText.substring(0, 8);
+    const escapeReg = (str) => str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    try {
+      const reg = new RegExp(`${escapeReg(start)}[^。！？<&\\n]{1,30}`);
+      if (reg.test(text)) return true;
+    } catch (e) {}
+  }
+  
+  return false;
+}
+
+// 智能模糊匹配高亮替换
+function highlightFlexibleText(html, originalText, highlightHtmlGenerator) {
+  if (!originalText) return { html, matched: false };
+  
+  // 1. 精确匹配
+  if (html.includes(originalText)) {
+    return {
+      html: html.replace(originalText, highlightHtmlGenerator(originalText)),
+      matched: true
+    };
+  }
+  
+  // 2. 双端匹配
+  if (originalText.length > 12) {
+    const start = originalText.substring(0, 8);
+    const end = originalText.substring(originalText.length - 8, originalText.length - 1);
+    const escapeReg = (str) => str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    try {
+      const reg = new RegExp(`${escapeReg(start)}[\\s\\S]{0,60}?${escapeReg(end)}`, 'g');
+      let matched = false;
+      const newHtml = html.replace(reg, (match) => {
+        matched = true;
+        return highlightHtmlGenerator(match);
+      });
+      if (matched) return { html: newHtml, matched: true };
+    } catch (e) {}
+  }
+  
+  // 3. 头部贪婪匹配
+  if (originalText.length > 8) {
+    const start = originalText.substring(0, 8);
+    const escapeReg = (str) => str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    try {
+      const reg = new RegExp(`${escapeReg(start)}[^。！？<&\\n]{1,30}`, 'g');
+      let matched = false;
+      const newHtml = html.replace(reg, (match) => {
+        matched = true;
+        return highlightHtmlGenerator(match);
+      });
+      if (matched) return { html: newHtml, matched: true };
+    } catch (e) {}
+  }
+  
+  return { html, matched: false };
+}
+
 // 简易 Markdown 解析器，用于右侧微信排版所见即所得实时效果渲染
-function renderMarkdownToHtml(markdownText) {
+function renderMarkdownToHtml(markdownText, suggestions = [], issues = []) {
   if (!markdownText) return '';
   let html = markdownText;
   
@@ -128,7 +201,96 @@ function renderMarkdownToHtml(markdownText) {
     return `<p style="margin:12px 0;line-height:1.88;font-size:14px;color:#3f3f46;">${textHtml}</p>`;
   });
   
-  return formattedBlocks.join('\n');
+  let finalHtml = formattedBlocks.join('\n');
+
+  // 7. 智能段落处建议高亮与插卡 (Suggestions & Issues 就地提示)
+  if ((suggestions && suggestions.length > 0) || (issues && issues.length > 0)) {
+    // 处理 AI 润色建议 (suggestions)
+    suggestions.forEach((sug, idx) => {
+      const original = sug.original_text;
+      if (original) {
+        const highlightId = `sug-hl-${idx}`;
+        const highlightHtmlGen = (textToReplace) => `<span id="${highlightId}" class="sug-highlight cursor-pointer" style="background:#eff6ff; border-bottom:2px dashed #3b82f6; color:#1d4ed8; padding:1px 0;" title="点击采纳此段落优化">${textToReplace}</span>`;
+        
+        const res = highlightFlexibleText(finalHtml, original, highlightHtmlGen);
+        if (res.matched) {
+          finalHtml = res.html;
+          const cardHtml = `
+            <div class="sug-card my-3 bg-blue-50/90 border border-blue-200/60 rounded-xl p-3 text-xs text-blue-800 space-y-1.5 shadow-sm" style="margin:12px 0;">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-bold text-blue-900 flex items-center gap-1">
+                  <span class="h-2 w-2 bg-blue-500 inline-block" style="display:inline-block;width:8px;height:8px;border-radius:50%;"></span>
+                  💡 段落优化润色建议
+                </span>
+                <button 
+                  type="button" 
+                  class="apply-sug-btn px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-semibold cursor-pointer border-0 active:scale-95 transition-all"
+                  data-idx="${idx}"
+                >
+                  ✓ 一键采纳
+                </button>
+              </div>
+              <p class="font-semibold text-zinc-800" style="margin:4px 0 6px;">${sug.description}</p>
+              <div class="bg-white/80 p-2 rounded border border-blue-100 text-[11px] text-blue-900 leading-relaxed font-mono">
+                <p class="line-through text-zinc-400" style="text-decoration:line-through;color:#a1a1aa;margin:0;">原文: ${sug.original_text}</p>
+                <p class="font-bold mt-1 text-blue-700" style="margin:4px 0 0;">建议替换为: ${sug.suggested_text}</p>
+              </div>
+            </div>
+          `;
+          const targetString = `${highlightId}" class="sug-highlight`;
+          const searchIndex = finalHtml.indexOf(targetString);
+          if (searchIndex !== -1) {
+            const nextPEnd = finalHtml.indexOf('</p>', searchIndex);
+            if (nextPEnd !== -1) {
+              finalHtml = finalHtml.substring(0, nextPEnd + 4) + cardHtml + finalHtml.substring(nextPEnd + 4);
+            }
+          }
+        }
+      }
+    });
+    
+    // 处理文稿校验 (issues) 的就地警告
+    const cleanIssues = (issues || []).filter(iss => iss.type !== 'illustration');
+    cleanIssues.forEach((iss, idx) => {
+      // 提取双引号里面的原句
+      const m = iss.detail.match(/[“"']([^“”"']+)[”"']/);
+      const targetText = m ? m[1] : null;
+      if (targetText) {
+        const highlightId = `iss-hl-${idx}`;
+        const highlightHtmlGen = (textToReplace) => `<span id="${highlightId}" class="iss-highlight" style="background:#fffbeb; border-bottom:2px dashed #f59e0b; color:#b45309; padding:1px 0;" title="${iss.detail}">${textToReplace}</span>`;
+        
+        const res = highlightFlexibleText(finalHtml, targetText, highlightHtmlGen);
+        if (res.matched) {
+          finalHtml = res.html;
+          const cardHtml = `
+            <div class="iss-card my-3 bg-amber-50/90 border border-amber-200/80 rounded-xl p-3 text-xs text-amber-800 space-y-1.5 shadow-sm" style="margin:12px 0;">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-bold text-amber-900 flex items-center gap-1">
+                  <span class="h-2 w-2 bg-amber-500 inline-block" style="display:inline-block;width:8px;height:8px;border-radius:50%;"></span>
+                  ⚠️ 事实与合规警告
+                </span>
+                <span class="text-[9px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
+                  ${iss.severity === 'blocker' ? '阻断' : iss.severity === 'warning' ? '警告' : '建议'}
+                </span>
+              </div>
+              <p class="text-zinc-800" style="color:#27272a;margin:4px 0 6px;">${iss.detail}</p>
+              <p class="text-[11px] text-amber-700 font-semibold mt-1 font-mono bg-white/70 p-2 rounded border border-amber-100" style="margin:4px 0 0;">💡 建议修改: ${iss.suggestion}</p>
+            </div>
+          `;
+          const targetString = `${highlightId}" class="iss-highlight"`;
+          const searchIndex = finalHtml.indexOf(targetString);
+          if (searchIndex !== -1) {
+            const nextPEnd = finalHtml.indexOf('</p>', searchIndex);
+            if (nextPEnd !== -1) {
+              finalHtml = finalHtml.substring(0, nextPEnd + 4) + cardHtml + finalHtml.substring(nextPEnd + 4);
+            }
+          }
+        }
+      }
+    });
+  }
+
+  return finalHtml;
 }
 
 
@@ -328,6 +490,16 @@ export default function Articles() {
     setSuggestions(prev => prev.filter(x => x !== sug))
   }
 
+  const handlePreviewClick = (e) => {
+    const btn = e.target.closest('.apply-sug-btn')
+    if (btn) {
+      const idx = parseInt(btn.getAttribute('data-idx'))
+      if (!isNaN(idx) && suggestions[idx]) {
+        handleApplySuggestion(suggestions[idx])
+      }
+    }
+  }
+
   const handleBodyPaste = async (e) => {
     const clipboardData = e.clipboardData
     if (!clipboardData) return
@@ -498,6 +670,14 @@ export default function Articles() {
     setFullArticle(null)
     setViewingFull(false)
     setIsEditing(false)
+    
+    if (selectedArticle?.id) {
+      api.getArticle(selectedArticle.id)
+        .then(data => {
+          setFullArticle(data.article || data)
+        })
+        .catch(err => console.error('自动刷新文稿详情失败:', err))
+    }
   }, [selectedArticle?.id])
 
   const handleReview = async () => {
@@ -765,33 +945,46 @@ export default function Articles() {
                   正在针对此文深度构思优化切入点...
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {suggestions.map((sug, i) => (
-                    <div key={i} className="bg-white border border-zinc-200/60 p-3 rounded-xl flex flex-col justify-between space-y-3 shadow-sm hover:shadow-md transition-shadow">
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[9px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
-                            {sug.target_label || '局部润色'}
-                          </span>
-                          <span className="text-[10px] text-zinc-400"># {i+1}</span>
-                        </div>
-                        <p className="text-xs font-semibold text-zinc-800 leading-relaxed">{sug.description}</p>
-                        <div className="text-[10px] text-zinc-400 space-y-1 bg-zinc-50 p-2 rounded-lg border border-zinc-100/50">
-                          {sug.original_text && (
-                            <p className="line-through truncate">原文: {sug.original_text}</p>
-                          )}
-                          <p className="text-blue-700 font-medium whitespace-pre-wrap">建议: {sug.suggested_text}</p>
-                        </div>
+                (() => {
+                  const filtered = suggestions.filter(sug => !sug.original_text);
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="text-xs text-blue-800 bg-blue-50/50 rounded-xl p-3 border border-blue-100/50 flex items-center gap-2">
+                        <span>💡</span>
+                        <span>所有段落级优化建议已全部就地标注在右侧预览的原文段落下方，供您实时对照并快速一键采纳。</span>
                       </div>
-                      <button
-                        onClick={() => handleApplySuggestion(sug)}
-                        className="w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold transition-all active:scale-[0.96] cursor-pointer"
-                      >
-                        ✓ 一键采纳建议
-                      </button>
+                    );
+                  }
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {filtered.map((sug, i) => (
+                        <div key={i} className="bg-white border border-zinc-200/60 p-3 rounded-xl flex flex-col justify-between space-y-3 shadow-sm hover:shadow-md transition-shadow">
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[9px] font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                                {sug.target_label || '局部润色'}
+                              </span>
+                              <span className="text-[10px] text-zinc-400"># {i+1}</span>
+                            </div>
+                            <p className="text-xs font-semibold text-zinc-800 leading-relaxed">{sug.description}</p>
+                            <div className="text-[10px] text-zinc-400 space-y-1 bg-zinc-50 p-2 rounded-lg border border-zinc-100/50">
+                              {sug.original_text && (
+                                <p className="line-through truncate">原文: {sug.original_text}</p>
+                              )}
+                              <p className="text-blue-700 font-medium whitespace-pre-wrap">建议: {sug.suggested_text}</p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleApplySuggestion(sug)}
+                            className="w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold transition-all active:scale-[0.96] cursor-pointer"
+                          >
+                            ✓ 一键采纳建议
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()
               )}
 
               {debugError && (
@@ -937,8 +1130,9 @@ export default function Articles() {
             </div>
             
             <div 
+              onClick={handlePreviewClick}
               className="flex-1 wechat-preview whitespace-pre-wrap break-words text-sm text-zinc-800 leading-relaxed font-sans overflow-y-auto pr-1"
-              dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(editBody) }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(editBody, suggestions, selectedReview?.issues) }}
             />
           </div>
 
@@ -1022,16 +1216,23 @@ export default function Articles() {
             const review = fullArticle.agent_trace?.[3]
             const r = review?.second_review || review?.review
             if (!r) return null
+            const cleanIssues = (r.issues || []).filter(iss => iss.type !== 'illustration')
+            const hasIssues = cleanIssues.length > 0
+            const isPassed = !cleanIssues.some(iss => iss.severity === 'blocker')
             return (
               <div className="mt-10 border-t border-zinc-100 pt-6">
                 <h3 className="text-sm font-semibold text-zinc-900 mb-4">文稿校验</h3>
                 <div className={`p-4 rounded-lg border text-sm ${
-                  r.passed
-                    ? 'bg-emerald-50 border-emerald-100 text-emerald-700'
-                    : 'bg-red-50 border-red-100 text-red-700'
+                  !isPassed
+                    ? 'bg-red-50 border-red-100 text-red-700'
+                    : hasIssues
+                      ? 'bg-amber-50/70 border-amber-100 text-amber-700'
+                      : 'bg-emerald-50 border-emerald-100 text-emerald-700'
                 }`}>
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="font-semibold">{r.passed ? '校验通过' : '发现问题'}</span>
+                    <span className="font-semibold">
+                      {!isPassed ? '发现阻断问题' : hasIssues ? '校验放行 (有警告)' : '校验通过'}
+                    </span>
                     {r.overall_comment && <span className="text-zinc-500">— {r.overall_comment}</span>}
                   </div>
                   {review.fixed && (
@@ -1040,13 +1241,13 @@ export default function Articles() {
                       {review.fixed.changes || '内容已优化'}
                     </div>
                   )}
-                  {r.issues?.length > 0 && (
+                  {hasIssues && (
                     <details>
                       <summary className="cursor-pointer hover:opacity-70 text-xs">
-                        {r.issues.length} 个问题详情
+                        {cleanIssues.length} 个问题详情
                       </summary>
                       <div className="mt-2 space-y-1.5">
-                        {r.issues.map((iss, i) => (
+                        {cleanIssues.map((iss, i) => (
                           <div key={i} className={`p-2 rounded text-xs ${
                             iss.severity === 'blocker' ? 'bg-red-50/50' :
                             iss.severity === 'warning' ? 'bg-amber-50/50' : 'bg-zinc-50'
@@ -1113,7 +1314,7 @@ export default function Articles() {
               <option value="published">已发布</option>
               <option value="failed">失败</option>
             </select>
-            <button onClick={fetchArticles} disabled={loading} className="btn-secondary h-10 px-4 text-sm disabled:opacity-40">
+            <button onClick={() => { fetchArticles(); refreshFullArticle(); }} disabled={loading} className="btn-secondary h-10 px-4 text-sm disabled:opacity-40">
               {loading ? '刷新中...' : '刷新'}
             </button>
           </div>
@@ -1239,15 +1440,19 @@ export default function Articles() {
                   <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 p-4">
                     <p className="text-sm font-semibold text-red-700">这篇文章未通过生成审核</p>
                     <p className="mt-1 text-xs leading-5 text-red-600">失败记录用于排查选题、正文或审核问题，不建议直接下载发布。</p>
-                    {selectedReview?.issues?.length > 0 && (
-                      <div className="mt-3 space-y-2">
-                        {selectedReview.issues.slice(0, 3).map((issue, index) => (
-                          <p key={index} className="rounded-xl bg-white/70 p-2 text-xs leading-5 text-red-700">
-                            {issue.detail || issue.suggestion || '审核未通过'}
-                          </p>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const cleanIssues = (selectedReview?.issues || []).filter(issue => issue.type !== 'illustration')
+                      if (cleanIssues.length === 0) return null
+                      return (
+                        <div className="mt-3 space-y-2">
+                          {cleanIssues.slice(0, 3).map((issue, index) => (
+                            <p key={index} className="rounded-xl bg-white/70 p-2 text-xs leading-5 text-red-700">
+                              {issue.detail || issue.suggestion || '审核未通过'}
+                            </p>
+                          ))}
+                        </div>
+                      )
+                    })()}
                   </div>
                 )}
 
@@ -1291,37 +1496,47 @@ export default function Articles() {
                   {deleting ? '删除中...' : '文稿删除'}
                 </button>
 
-                {selectedReview && selectedArticle.status !== 'failed' && (
-                  <div className={`mt-4 rounded-2xl border p-3 text-xs ${
-                    selectedReview.passed
-                      ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
-                      : 'border-red-100 bg-red-50 text-red-700'
-                  }`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold">{selectedReview.passed ? '校验通过' : '发现问题'}</span>
-                      {selectedReview.issues?.length > 0 && <span>{selectedReview.issues.length} 项</span>}
+                 {(() => {
+                  const cleanIssues = (selectedReview?.issues || []).filter(iss => iss.type !== 'illustration')
+                  const hasIssues = cleanIssues.length > 0
+                  const isPassed = !cleanIssues.some(iss => iss.severity === 'blocker')
+                  if (!selectedReview) return null
+                  return (
+                    <div className={`mt-4 rounded-2xl border p-3 text-xs ${
+                      !isPassed
+                        ? 'border-red-100 bg-red-50 text-red-700'
+                        : hasIssues
+                          ? 'border-amber-100 bg-amber-50/70 text-amber-700'
+                          : 'border-emerald-100 bg-emerald-50 text-emerald-700'
+                    }`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">
+                          {!isPassed ? '发现阻断问题' : hasIssues ? '校验放行 (有警告)' : '校验通过'}
+                        </span>
+                        {hasIssues && <span>{cleanIssues.length} 项</span>}
+                      </div>
+                      {reviewResult?.fixed && (
+                        <p className="mt-2 leading-5 text-zinc-600">已自动修正：{reviewResult.fixed.changes || '内容已优化'}</p>
+                      )}
+                      {reviewResult?.illustrations_regen === true && (
+                        <p className="mt-2 leading-5 text-amber-600">插图已同步重新生成</p>
+                      )}
+                      {hasIssues && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer hover:opacity-70">查看问题详情</summary>
+                          <div className="mt-2 max-h-40 space-y-1.5 overflow-auto">
+                            {cleanIssues.map((iss, i) => (
+                              <div key={i} className="rounded-xl bg-white/65 p-2 leading-5 text-zinc-600">
+                                <span className="font-semibold">{iss.severity === 'blocker' ? '阻断' : iss.severity === 'warning' ? '警告' : '建议'}：</span>
+                                {iss.detail}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                     </div>
-                    {reviewResult?.fixed && (
-                      <p className="mt-2 leading-5 text-zinc-600">已自动修正：{reviewResult.fixed.changes || '内容已优化'}</p>
-                    )}
-                    {reviewResult?.illustrations_regen === true && (
-                      <p className="mt-2 leading-5 text-amber-600">插图已同步重新生成</p>
-                    )}
-                    {selectedReview.issues?.length > 0 && (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer hover:opacity-70">查看问题详情</summary>
-                        <div className="mt-2 max-h-40 space-y-1.5 overflow-auto">
-                          {selectedReview.issues.map((iss, i) => (
-                            <div key={i} className="rounded-xl bg-white/65 p-2 leading-5 text-zinc-600">
-                              <span className="font-semibold">{iss.severity === 'blocker' ? '阻断' : iss.severity === 'warning' ? '警告' : '建议'}：</span>
-                              {iss.detail}
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                )}
+                  )
+                })()}
               </div>
             </div>
           ) : (

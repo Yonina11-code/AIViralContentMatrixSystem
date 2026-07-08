@@ -227,6 +227,16 @@ async def generate_article(
     # 插图 prompt 存入 trace[2]
     illus_trace = illus_prompts
 
+    # 既然插画已成功生成，清洗 review_trace 里的“缺少插画 prompt”过期警告
+    if review_trace and isinstance(review_trace, dict):
+        for k in ["review", "second_review"]:
+            if k in review_trace and isinstance(review_trace[k], dict):
+                issues = review_trace[k].get("issues", [])
+                if isinstance(issues, list):
+                    # 过滤掉类型为 "illustration" 的警告条目
+                    cleaned_issues = [iss for iss in issues if iss.get("type") != "illustration"]
+                    review_trace[k]["issues"] = cleaned_issues
+
     # Step 6: 保存文章到数据库
     article = Article(
         id=str(uuid.uuid4()),
