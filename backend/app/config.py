@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     google_cse_id: str = ""
 
+    # Tavily AI Search
+    tavily_api_key: str = ""
+
     # WeChat Official Account
     wechat_app_id: str = ""
     wechat_app_secret: str = ""

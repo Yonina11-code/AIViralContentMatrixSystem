@@ -25,14 +25,18 @@ export const api = {
   },
   getContentItem: (id) => request(`/content/${id}`),
   getDomains: () => request('/content/domains'),
-  triggerCollection: (source = 'all', domain = 'tech', limit = 20) =>
-    request(`/content/collect?source=${source}&domain=${domain}&limit=${limit}`, { method: 'POST' }),
+  triggerCollection: (source = 'all', domain = 'tech', limit = 20, keyword = '') => {
+    const q = new URLSearchParams({ source, domain, limit })
+    if (keyword) q.set('keyword', keyword)
+    return request(`/content/collect?${q}`, { method: 'POST' })
+  },
   getFoloStatus: () => request('/content/folo/status'),
   triggerFoloLogin: () => request('/content/folo/login', { method: 'POST' }),
   getCollectionStatus: (taskId) => request(`/content/collect/status/${taskId}`),
 
   deleteContent: (id) => request(`/content/${id}`, { method: 'DELETE' }),
   batchDeleteContent: (ids) => request('/content/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  batchSaveContent: (items) => request('/content/batch-save', { method: 'POST', body: JSON.stringify({ items }) }),
 
   // Articles
   getArticles: (params) => {

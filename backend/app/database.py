@@ -50,6 +50,25 @@ async def init_db():
     except Exception:
         pass
 
+    # 迁移：为 domains 表添加 wechat_ids 与 xiaohongshu_ids 字段（若不存在）
+    try:
+        async with engine.begin() as conn:
+            # 检测 wechat_ids
+            result_wechat = await conn.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name='domains' AND column_name='wechat_ids'")
+            )
+            if not result_wechat.scalar():
+                await conn.execute(text("ALTER TABLE domains ADD COLUMN wechat_ids JSONB DEFAULT '[]'::jsonb"))
+            
+            # 检测 xiaohongshu_ids
+            result_xhs = await conn.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name='domains' AND column_name='xiaohongshu_ids'")
+            )
+            if not result_xhs.scalar():
+                await conn.execute(text("ALTER TABLE domains ADD COLUMN xiaohongshu_ids JSONB DEFAULT '[]'::jsonb"))
+    except Exception as e:
+        print(f"[InitDB Patch] Error adding domains columns: {e}")
+
     # 如果 domains 表为空，从 config.py 播种默认领域
     async with async_session_factory() as sess:
         existing = await sess.execute(text("SELECT count(*) FROM domains"))

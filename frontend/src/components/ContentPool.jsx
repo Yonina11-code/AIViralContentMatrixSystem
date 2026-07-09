@@ -18,10 +18,16 @@ export default function ContentPool() {
   // 采集弹窗
   const [showModal, setShowModal] = useState(false)
   const [collectSource, setCollectSource] = useState('folo')
-  const [collectDomain, setCollectDomain] = useState('tech')
+  const [collectDomain, setCollectDomain] = useState('health_regimen')
   const [collectLimit, setCollectLimit] = useState(20)
+  const [collectKeyword, setCollectKeyword] = useState('')
   const [collecting, setCollecting] = useState(false)
   const [collectMsg, setCollectMsg] = useState(null)
+  const [collectDetails, setCollectDetails] = useState([])
+  const [showSaveModal, setShowSaveModal] = useState(false)
+  const [crawledItems, setCrawledItems] = useState([])
+  const [crawledSaving, setCrawledSaving] = useState(false)
+  const [selectedCrawledFps, setSelectedCrawledFps] = useState(new Set())
   const [activeTasks, setActiveTasks] = useState([])
   const [foloStatus, setFoloStatus] = useState({ status: 'checking', user: null })
 
@@ -34,7 +40,10 @@ export default function ContentPool() {
   useEffect(() => {
     api.getDomains().then(data => {
       setDomains(data.domains)
-      if (data.domains.length > 0) setCollectDomain(data.domains[0].id)
+      if (data.domains.length > 0) {
+        const hasHealth = data.domains.some(d => d.id === 'health_regimen')
+        setCollectDomain(hasHealth ? 'health_regimen' : data.domains[0].id)
+      }
     }).catch(() => {})
     checkFoloStatus()
   }, [checkFoloStatus])
@@ -76,8 +85,9 @@ export default function ContentPool() {
   const handleCollect = async () => {
     setCollecting(true)
     setCollectMsg('正在提交采集任务，请稍候...')
+    setCollectDetails([])
     try {
-      const res = await api.triggerCollection(collectSource, collectDomain, collectLimit)
+      const res = await api.triggerCollection(collectSource, collectDomain, collectLimit, collectKeyword)
       const tasks = res.tasks || []
       if (tasks.length === 0) {
         setCollectMsg('未提交任何采集任务。')
@@ -85,6 +95,7 @@ export default function ContentPool() {
         return
       }
       setShowModal(false)
+      setCollectKeyword('')
       setCollectMsg('采集任务已提交，后台正在处理中，请稍候...')
       
       const tasksToPoll = tasks.map(t => ({ ...t, status: 'PENDING', result: null }))
@@ -139,36 +150,85 @@ export default function ContentPool() {
 
         // 任务全部结束，汇总输出结果
         const details = []
+        const allItems = []
+        let hasError = false
         updatedTasks.forEach(x => {
-          const srcLabel = x.source === 'folo' ? 'Folo智能' : x.source === 'rss' ? 'RSS' : '搜索引擎'
+          const srcLabel = x.source === 'folo' ? 'Folo智能' : x.source === 'rss' ? 'RSS' : x.source === 'wechat' ? '微信公众号' : x.source === 'xhs' ? '小红书' : x.source === 'tavily' ? 'AI搜索' : '搜索引擎'
           if (x.status === 'SUCCESS') {
             const col = x.result?.collected ?? 0
-            const sav = x.result?.saved ?? 0
-            details.push(`${srcLabel}抓回 ${col} 条，入库 ${sav} 条`)
+            if (x.result?.error) {
+              hasError = true
+              details.push(`${srcLabel}错误(${x.result.error})`)
+            } else {
+              details.push(`${srcLabel}抓回 ${col} 条`)
+            }
+            if (x.result?.items) {
+              allItems.push(...x.result.items)
+            }
           } else if (x.status === 'FAILURE') {
+            hasError = true
             details.push(`${srcLabel}失败(${x.result || '网络异常'})`)
           }
         })
 
         let msg = '数据采集完成。'
         if (details.length > 0) {
-          msg = `采集结束：${details.join('；')}`
+          msg = `${hasError ? '采集失败' : '采集结束'}：${details.join('；')}。${allItems.length > 0 ? '请在弹出窗口中筛选保存内容。' : ''}`
         }
 
         setCollectMsg(msg)
         setCollecting(false)
         setActiveTasks([])
-        fetchData() // 自动刷新列表数据
+        
+        if (allItems.length > 0) {
+          setCrawledItems(allItems)
+          setShowSaveModal(true)
+        }
 
-        // 6 秒后自动收起结果气泡
+        // 12 秒后自动收起结果气泡
         setTimeout(() => {
           setCollectMsg(null)
-        }, 6000)
+        }, 12000)
       }
     }, 3000)
 
     return () => clearInterval(timer)
   }, [activeTasks, fetchData])
+
+  // 采集完后，弹窗默认选中所有非重复的内容项
+  useEffect(() => {
+    if (showSaveModal && crawledItems.length > 0) {
+      const initialSelected = new Set()
+      crawledItems.forEach(item => {
+        if (!item.is_duplicate) {
+          initialSelected.add(item.fingerprint)
+        }
+      })
+      setSelectedCrawledFps(initialSelected)
+    }
+  }, [showSaveModal, crawledItems])
+
+  // 执行批量确认入库保存
+  const handleConfirmSave = async () => {
+    if (selectedCrawledFps.size === 0) {
+      alert('请至少勾选一条要保存的内容！')
+      return
+    }
+    const itemsToSave = crawledItems.filter(item => selectedCrawledFps.has(item.fingerprint))
+    setCrawledSaving(true)
+    try {
+      const res = await api.batchSaveContent(itemsToSave)
+      alert(res.message || `成功保存 ${res.saved} 条内容`)
+      setShowSaveModal(false)
+      setCrawledItems([])
+      setSelectedCrawledFps(new Set())
+      fetchData() // 刷新列表
+    } catch (e) {
+      alert('保存失败: ' + e.message)
+    } finally {
+      setCrawledSaving(false)
+    }
+  }
 
   // ── 删除 ────────────────────────────────────────────
   const handleDelete = async (id) => {
@@ -355,7 +415,9 @@ export default function ContentPool() {
                     {item.title}
                   </h3>
                   {item.summary && (
-                    <p className="text-xs text-zinc-400 mt-1 line-clamp-1">{item.summary}</p>
+                    <p className="text-xs text-zinc-400 mt-1 line-clamp-1">
+                      {item.summary.replace(/<[^>]*>/g, '')}
+                    </p>
                   )}
                   {item.body && (
                     <p className="text-xs text-zinc-300 mt-1 line-clamp-1 italic">
@@ -436,20 +498,24 @@ export default function ContentPool() {
               {/* 选择数据源 */}
               <div>
                 <label className="block text-xs font-medium text-zinc-500 mb-1.5">数据源</label>
-                <div className="flex gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   {[
-                    { value: 'folo', label: 'Folo 智能采集' },
-                    { value: 'rss', label: 'RSS' },
-                    { value: 'search', label: '搜索引擎' },
+                    { value: 'folo', label: 'Folo 智能' },
+                    { value: 'rss', label: 'RSS 订阅' },
+                    { value: 'search', label: '谷歌搜索' },
+                    { value: 'wechat', label: '微信公众号' },
+                    { value: 'xhs', label: '小红书' },
+                    { value: 'tavily', label: 'AI 搜索' },
                     { value: 'all', label: '全部' },
                   ].map(s => (
                     <button key={s.value}
+                      type="button"
                       onClick={() => setCollectSource(s.value)}
-                      className={`flex-1 h-9 text-xs font-medium rounded-xl transition-all active:scale-[0.97] ${
+                      className={`h-9 text-xs font-medium rounded-xl transition-all active:scale-[0.97] truncate px-1 ${
                         collectSource === s.value
-                          ? 'bg-zinc-900 text-white'
+                          ? 'bg-zinc-950 text-white shadow-sm'
                           : 'bg-zinc-50 text-zinc-500 hover:bg-zinc-100'
-                      }`}>
+                      } ${s.value === 'all' ? 'col-span-3 bg-zinc-100/70 hover:bg-zinc-100 text-zinc-600' : ''}`}>
                       {s.label}
                     </button>
                   ))}
@@ -481,6 +547,27 @@ export default function ContentPool() {
                   className="control w-full px-3 text-sm">
                   {domains.map(d => <option key={d.id} value={d.id}>{d.label} ({d.id})</option>)}
                 </select>
+              </div>
+
+              {/* 临时检索词 / 博主ID */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1.5 flex justify-between items-center">
+                  <span>本次临时输入 <span className="text-zinc-300">（选填）</span></span>
+                  <span className="text-[10px] text-zinc-400">支持顿号/逗号/空格分隔</span>
+                </label>
+                <input 
+                  type="text" 
+                  value={collectKeyword}
+                  onChange={e => setCollectKeyword(e.target.value)}
+                  placeholder={
+                    collectSource === 'wechat' 
+                      ? '例如：dxy_dxdoctor (微信公众号原始ID，留空使用默认源)' 
+                      : collectSource === 'xhs'
+                        ? '例如：5d6bxxxx (小红书博主ID，留空使用默认源)'
+                        : '例如：中医养生、日常调理 (留空使用领域默认检索词)'
+                  }
+                  className="control w-full px-3 h-10 text-sm placeholder:text-zinc-300" 
+                />
               </div>
 
               {/* 采集条数 */}
@@ -538,8 +625,96 @@ export default function ContentPool() {
             )}
 
             {/* 正文 */}
-            <div className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">
-              {detailItem.body || '(无正文内容)'}
+            <div 
+              className="text-sm text-zinc-700 leading-relaxed space-y-3"
+              dangerouslySetInnerHTML={{ __html: detailItem.body || '(无正文内容)' }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ===== 采集结果筛选导入弹窗 ===== */}
+      {showSaveModal && crawledItems.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/35 p-4 backdrop-blur-sm" onClick={() => { if (!crawledSaving) setShowSaveModal(false); }}>
+          <div className="surface max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-[1.5rem] p-6 flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-1 text-base font-semibold text-zinc-950">发现采集内容</h3>
+            <p className="mb-5 text-xs text-zinc-500">请勾选需要存入内容池的素材。系统已自动为您选中全新内容，已重复的项目不可勾选。</p>
+
+            <div className="flex-1 overflow-y-auto border border-zinc-200/60 rounded-2xl p-2 bg-zinc-50/30 space-y-1 max-h-[45vh]">
+              {crawledItems.map((item, index) => {
+                const isSelected = selectedCrawledFps.has(item.fingerprint);
+                return (
+                  <div key={index} className={`flex items-start gap-3 p-3.5 rounded-xl border transition-all ${
+                    item.is_duplicate 
+                      ? 'border-zinc-200/50 bg-zinc-50/80 opacity-60' 
+                      : isSelected 
+                        ? 'border-blue-200 bg-blue-50/10' 
+                        : 'border-zinc-100 hover:border-zinc-200 bg-white'
+                  }`}>
+                    <label className="pt-0.5 cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        disabled={item.is_duplicate}
+                        checked={isSelected}
+                        onChange={() => {
+                          setSelectedCrawledFps(prev => {
+                            const next = new Set(prev);
+                            if (next.has(item.fingerprint)) next.delete(item.fingerprint);
+                            else next.add(item.fingerprint);
+                            return next;
+                          });
+                        }}
+                        className="w-4 h-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-600/20 accent-blue-600" 
+                      />
+                    </label>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="text-xs font-semibold text-zinc-900 truncate flex-1">{item.title}</h4>
+                        <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-md ${
+                          item.is_duplicate ? 'bg-zinc-100 text-zinc-400' : 'bg-emerald-50 text-emerald-600 font-medium'
+                        }`}>
+                          {item.is_duplicate ? item.duplicate_reason || '已存在' : '新发现'}
+                        </span>
+                      </div>
+                      {item.summary && <p className="text-[11px] text-zinc-400 mt-1 line-clamp-1">{item.summary.replace(/<[^>]*>/g, '')}</p>}
+                      <div className="flex items-center gap-2 mt-2 text-[10px] text-zinc-400 font-mono">
+                        <span>源: {item.source_name || item.source}</span>
+                        <span>领域: {item.domain}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 mt-6">
+              <label className="flex items-center gap-1.5 cursor-pointer select-none text-xs text-zinc-500">
+                <input 
+                  type="checkbox" 
+                  checked={crawledItems.filter(x => !x.is_duplicate).length > 0 && crawledItems.filter(x => !x.is_duplicate).every(x => selectedCrawledFps.has(x.fingerprint))}
+                  onChange={(e) => {
+                    const nonDups = crawledItems.filter(x => !x.is_duplicate);
+                    if (e.target.checked) {
+                      setSelectedCrawledFps(new Set(nonDups.map(x => x.fingerprint)));
+                    } else {
+                      setSelectedCrawledFps(new Set());
+                    }
+                  }}
+                  className="w-3.5 h-3.5 rounded border-zinc-300 text-blue-600 accent-blue-600" 
+                />
+                <span>全选全新项目</span>
+              </label>
+
+              <div className="flex gap-2">
+                <button onClick={handleConfirmSave} disabled={crawledSaving || selectedCrawledFps.size === 0}
+                  className="btn-primary h-10 px-5 text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-40">
+                  {crawledSaving ? '正在导入...' : `确认导入 (已选 ${selectedCrawledFps.size} 篇)`}
+                </button>
+                <button onClick={() => { if (!crawledSaving) setShowSaveModal(false); }}
+                  className="btn-secondary h-10 px-5 text-xs">
+                  取消
+                </button>
+              </div>
             </div>
           </div>
         </div>

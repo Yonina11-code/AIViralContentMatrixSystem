@@ -1,5 +1,6 @@
 """Content Pool API"""
 
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -8,30 +9,82 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.content_item import ContentItem
 from app.models.domain import Domain
-from app.tasks import collect_rss, collect_search, collect_folo
+from app.tasks import collect_rss, collect_search, collect_folo, collect_wechat, collect_xhs, collect_tavily
 
 router = APIRouter(prefix="/api/content", tags=["content"])
 
 
 @router.post("/collect")
 async def trigger_collection(
-    source: str = Query("all", description="rss / folo / search / all"),
+    source: str = Query("all", description="rss / folo / search / wechat / xhs / tavily / all"),
     domain: str = Query("tech", description="领域标识"),
     limit: int = Query(20, ge=1, le=100, description="采集条数"),
+    keyword: str | None = Query(None, description="临时手输关键词或博主ID"),
+    db: AsyncSession = Depends(get_db),
 ):
     """手动触发内容采集"""
     tasks = []
+    
+    # 拆分临时输入词
+    import re
+    kw_list = []
+    if keyword:
+        kw_list = [k.strip() for k in re.split(r'[、，,\s]+', keyword) if k.strip()]
+        
+    d = await db.get(Domain, domain)
+    
+    # 准备 Folo 和 搜索引擎 的默认词
+    folo_kws = None
+    search_kws = None
+    if kw_list:
+        db_folo = d.folo_keywords if d else []
+        if not db_folo:
+            from app.config import settings
+            db_folo = settings.domains.get(domain, {}).get("folo_keywords", [])
+        folo_kws = kw_list + [k for k in db_folo if k not in kw_list]
+        
+        db_search = d.search_keywords if d else []
+        if not db_search:
+            from app.config import settings
+            db_search = settings.domains.get(domain, {}).get("search_keywords", [])
+        search_kws = kw_list + [k for k in db_search if k not in kw_list]
+
+    # 微信公众号
+    if source in ("wechat", "all"):
+        wechat_ids = kw_list if (source == "wechat" and kw_list) else (d.wechat_ids if d else [])
+        task = collect_wechat.delay(wechat_ids=wechat_ids, domain=domain, limit=limit)
+        tasks.append({"source": "wechat", "task_id": task.id, "domain": domain, "limit": limit})
+        
+    # 小红书
+    if source in ("xhs", "all"):
+        xhs_ids = kw_list if (source == "xhs" and kw_list) else (d.xiaohongshu_ids if d else [])
+        task = collect_xhs.delay(xhs_ids=xhs_ids, domain=domain, limit=limit)
+        tasks.append({"source": "xhs", "task_id": task.id, "domain": domain, "limit": limit})
+        
+    # Tavily AI 搜索
+    if source == "tavily":
+        tav_kws = kw_list if kw_list else (d.search_keywords if d else [])
+        task = collect_tavily.delay(keywords=tav_kws, domain=domain, limit=limit)
+        tasks.append({"source": "tavily", "task_id": task.id, "domain": domain, "limit": limit})
+
+    # RSS
     if source in ("rss", "all"):
         task = collect_rss.delay(domain=domain, limit=limit)
         tasks.append({"source": "rss", "task_id": task.id, "domain": domain, "limit": limit})
+        
+    # Folo 智能采集
     if source in ("folo", "all"):
-        task = collect_folo.delay(domain=domain, limit=limit)
+        task = collect_folo.delay(search_keywords=folo_kws, domain=domain, limit=limit)
         tasks.append({"source": "folo", "task_id": task.id, "domain": domain, "limit": limit})
+        
+    # 搜索引擎
     if source in ("search", "search_engine", "all"):
-        task = collect_search.delay(domain=domain, limit=limit)
+        task = collect_search.delay(keywords=search_kws, domain=domain, limit=limit)
         tasks.append({"source": "search_engine", "task_id": task.id, "domain": domain, "limit": limit})
+        
     if not tasks:
-        raise HTTPException(400, f"无效的 source: {source}，可选: rss, folo, search, all")
+        raise HTTPException(400, f"无效的 source: {source}，可选: rss, folo, search, wechat, xhs, tavily, all")
+        
     return {"message": "采集任务已提交", "tasks": tasks}
 
 
@@ -194,3 +247,52 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
     query = select(ContentItem.source, func.count().label("count")).group_by(ContentItem.source)
     rows = (await db.execute(query)).all()
     return {"sources": [{"source": r[0], "count": r[1]} for r in rows]}
+
+
+class BatchSaveRequest(BaseModel):
+    items: list[dict]
+
+
+@router.post("/batch-save")
+async def batch_save_content(body: BatchSaveRequest, db: AsyncSession = Depends(get_db)):
+    """批量保存前端审核确认后的内容项"""
+    saved = 0
+    for item in body.items:
+        # 排重检查（双保险）
+        fp = item.get("fingerprint")
+        if not fp:
+            continue
+        existing = (await db.execute(
+            select(ContentItem).where(ContentItem.fingerprint == fp)
+        )).scalar()
+        if existing:
+            continue
+            
+        published_at = None
+        if item.get("published_at"):
+            try:
+                published_at = datetime.fromisoformat(item["published_at"])
+            except ValueError:
+                pass
+
+        ci = ContentItem(
+            title=item.get("title", ""),
+            body=item.get("body"),
+            summary=item.get("summary"),
+            url=item.get("url"),
+            source=item.get("source", "unknown"),
+            source_name=item.get("source_name"),
+            author=item.get("author"),
+            tags=item.get("tags", []),
+            published_at=published_at,
+            read_count=item.get("read_count", 0),
+            like_count=item.get("like_count", 0),
+            comment_count=item.get("comment_count", 0),
+            favorite_count=item.get("favorite_count", 0),
+            fingerprint=fp,
+            domain=item.get("domain", "tech"),
+        )
+        db.add(ci)
+        saved += 1
+    await db.commit()
+    return {"message": f"成功保存 {saved} 条内容", "saved": saved}

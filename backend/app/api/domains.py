@@ -20,6 +20,8 @@ class DomainCreate(BaseModel):
     folo_keywords: list[str] = []
     search_keywords: list[str] = []
     rss_feed_urls: list[str] = []
+    wechat_ids: list[str] = []
+    xiaohongshu_ids: list[str] = []
 
 
 class DomainUpdate(BaseModel):
@@ -28,6 +30,8 @@ class DomainUpdate(BaseModel):
     folo_keywords: list[str] | None = None
     search_keywords: list[str] | None = None
     rss_feed_urls: list[str] | None = None
+    wechat_ids: list[str] | None = None
+    xiaohongshu_ids: list[str] | None = None
 
 
 class DomainOut(BaseModel):
@@ -37,6 +41,8 @@ class DomainOut(BaseModel):
     folo_keywords: list[str]
     search_keywords: list[str]
     rss_feed_urls: list[str]
+    wechat_ids: list[str]
+    xiaohongshu_ids: list[str]
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -73,6 +79,8 @@ async def create_domain(data: DomainCreate, db: AsyncSession = Depends(get_db)):
         folo_keywords=data.folo_keywords,
         search_keywords=data.search_keywords,
         rss_feed_urls=data.rss_feed_urls,
+        wechat_ids=data.wechat_ids,
+        xiaohongshu_ids=data.xiaohongshu_ids,
     )
     db.add(d)
     await db.commit()
@@ -117,6 +125,8 @@ def _domain_to_dict(d: Domain) -> dict:
         "folo_keywords": d.folo_keywords or [],
         "search_keywords": d.search_keywords or [],
         "rss_feed_urls": d.rss_feed_urls or [],
+        "wechat_ids": getattr(d, "wechat_ids", []) or [],
+        "xiaohongshu_ids": getattr(d, "xiaohongshu_ids", []) or [],
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "updated_at": d.updated_at.isoformat() if d.updated_at else None,
     }
