@@ -31,6 +31,24 @@ class IllustrationPromptTests(unittest.TestCase):
         self.assertNotIn("white space left for title text overlay", data["cover"]["copy_prompt"].lower())
         self.assertIn(STYLE_LOCK, data["illustrations"][0]["copy_prompt"])
 
+    def test_parse_result_deduplicates_repeated_style_prefixes(self):
+        repeated = f"{STYLE_LOCK}, {STYLE_LOCK}, steamed fish on a table"
+        raw = f"""
+        {{
+          "visual_style": "{STYLE_LOCK}, {STYLE_LOCK}, warm oat palette",
+          "cover": {{
+            "copy_prompt": "{repeated}",
+            "aspect_ratio": "16:9"
+          }},
+          "illustrations": []
+        }}
+        """
+
+        data = IllustrationEditorAgent()._parse_result(raw)
+
+        self.assertEqual(data["visual_style"].count(STYLE_LOCK), 1)
+        self.assertEqual(data["cover"]["copy_prompt"].count(STYLE_LOCK), 1)
+
     def test_system_prompt_requires_consistent_copy_ready_output(self):
         from app.agents import illustration_editor
 

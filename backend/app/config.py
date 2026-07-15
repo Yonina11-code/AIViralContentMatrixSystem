@@ -1,7 +1,11 @@
+from pathlib import Path
+from typing import Any
+
 from pydantic_settings import BaseSettings
 
 
-from typing import Any
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = BACKEND_DIR.parent
 
 
 class Settings(BaseSettings):
@@ -30,12 +34,12 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     google_cse_id: str = ""
 
-    # Tavily AI Search
-    tavily_api_key: str = ""
-
     # WeChat Official Account
     wechat_app_id: str = ""
     wechat_app_secret: str = ""
+
+    # Zhihu Developer Platform
+    zhihu_access_secret: str = ""
 
     # Collection — 领域分组配置（v2 多领域支持）
     # 每个 key 是领域标识，value 包含 label / rss_feed_urls / search_keywords
@@ -73,7 +77,11 @@ class Settings(BaseSettings):
 
     # Publishing
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_file": (PROJECT_ROOT / ".env", BACKEND_DIR / ".env"),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     # 兼容旧属性 — 从 domains 中取默认领域（第一个）
     @property

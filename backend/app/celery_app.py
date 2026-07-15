@@ -29,6 +29,14 @@ celery_app.conf.update(
             "schedule": 43200.0,  # every 12 hours
             "kwargs": {"days": 7},
         },
+        "collect-zhihu-every-2hours": {
+            "task": "app.tasks.collect_zhihu",
+            "schedule": 7200.0,
+        },
+        "publish-due-articles-every-5min": {
+            "task": "app.tasks.publish_due_articles",
+            "schedule": 300.0,
+        },
     },
 )
 

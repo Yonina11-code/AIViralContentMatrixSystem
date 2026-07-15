@@ -159,6 +159,8 @@ export default function Generate() {
   // 用户的素材侧重点选择状态
   const [selectedItems, setSelectedItems] = useState([])
   const [focus, setFocus] = useState('')
+  const [topicCards, setTopicCards] = useState([])
+  const [loadingCards, setLoadingCards] = useState(false)
 
   const loadSelectedItems = () => {
     try {
@@ -198,6 +200,16 @@ export default function Generate() {
       if (data.domains.length > 0) setSelectedDomain(data.domains[0].id)
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    const domain = selectedDomain || domains[0]?.id
+    if (!domain) return undefined
+    setLoadingCards(true)
+    api.getTopicCards({ domain, limit: 4 })
+      .then(data => setTopicCards(data.cards || []))
+      .catch(() => setTopicCards([]))
+      .finally(() => setLoadingCards(false))
+  }, [selectedDomain, domains])
 
   useEffect(() => {
     if (!generating) return undefined
@@ -244,6 +256,13 @@ export default function Generate() {
     } finally {
       setGenerating(false)
     }
+  }
+
+  const applyTopicCard = (card) => {
+    const picked = (card.item_ids || []).map(id => ({ id, title: card.topic, domain: selectedDomain }))
+    setSelectedItems(picked)
+    localStorage.setItem('selected_content_items', JSON.stringify(picked))
+    setFocus(`${card.suggested_angle}\n\n建议大纲：\n${(card.outline || []).map((x, i) => `${i + 1}. ${x}`).join('\n')}`)
   }
 
   const handleViewFullArticle = async () => {
@@ -299,6 +318,37 @@ export default function Generate() {
               </button>
             </div>
 
+            <div className="rounded-2xl border border-zinc-100 bg-white/70 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-zinc-700">生成前选题卡</p>
+                  <p className="mt-1 text-[11px] text-zinc-400">基于未使用素材质量、来源和主题自动推荐。</p>
+                </div>
+                {loadingCards && <span className="text-[11px] text-zinc-300">分析中...</span>}
+              </div>
+              {topicCards.length === 0 ? (
+                <p className="text-xs text-zinc-400">暂无可推荐选题，先去内容池采集或选择素材。</p>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {topicCards.map((card, i) => (
+                    <button
+                      key={`${card.topic}-${i}`}
+                      onClick={() => applyTopicCard(card)}
+                      disabled={generating}
+                      className="rounded-2xl border border-zinc-100 bg-zinc-50/70 p-3 text-left transition-all hover:border-blue-200 hover:bg-blue-50/50 disabled:opacity-40"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-zinc-900">{card.topic}</span>
+                        <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-mono text-zinc-500">Q {card.avg_quality}</span>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{card.suggested_angle}</p>
+                      <p className="mt-2 text-[11px] text-zinc-400">{card.material_count} 条素材 · {Object.keys(card.sources || {}).join(' / ')}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* 用户自定义素材与侧重点配置区域 */}
             {selectedItems.length > 0 && (
               <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3">
@@ -308,7 +358,7 @@ export default function Generate() {
                     已载入选定参考素材 ({selectedItems.length} 篇)
                   </span>
                   <button onClick={handleClearSelected} disabled={generating}
-                    className="text-xs text-blue-600 font-semibold hover:underline bg-transparent border-0 cursor-pointer p-0">
+                    className="shrink-0 whitespace-nowrap text-xs text-blue-600 font-semibold hover:underline bg-transparent border-0 cursor-pointer p-0">
                     清除选择，使用全自动选题 ✕
                   </button>
                 </div>
@@ -349,7 +399,7 @@ export default function Generate() {
                             return `${trimmed}，${tag}`
                           })
                         }}
-                        className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-white hover:bg-blue-50/70 hover:text-blue-600 hover:border-blue-200 border border-zinc-200 text-zinc-600 active:scale-[0.96] transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                        className="whitespace-nowrap px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-white hover:bg-blue-50/70 hover:text-blue-600 hover:border-blue-200 border border-zinc-200 text-zinc-600 active:scale-[0.96] transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
                       >
                         + {tag}
                       </button>

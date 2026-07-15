@@ -75,13 +75,17 @@ trap cleanup SIGINT SIGTERM
 title "前置检查"
 
 # 检查必要命令
-for cmd in docker lsof python3 npm; do
+for cmd in docker lsof uv npm; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         error "未找到 $cmd，请先安装"
         exit 1
     fi
 done
 info "必要命令均已安装"
+
+PYTHON_VERSION="$(cat "$PROJECT_ROOT/.python-version")"
+VENV_DIR="$PROJECT_ROOT/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
 
 # 检查 Docker daemon 是否可用
 if ! docker info >/dev/null 2>&1; then
@@ -164,25 +168,26 @@ info "CELERY_BROKER_URL=$CELERY_BROKER_URL"
 # ============================================================
 title "启动后端 (端口 $BACKEND_PORT)"
 
+cd "$PROJECT_ROOT"
+
+info "同步 Python 虚拟环境 (uv, Python $PYTHON_VERSION)..."
+uv sync --python "$PYTHON_VERSION"
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    error "未找到项目虚拟环境解释器: $PYTHON_BIN"
+    exit 1
+fi
+
+ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
+if [ "$ACTUAL_PYTHON_VERSION" != "$PYTHON_VERSION" ]; then
+    error "Python 版本不匹配: 期望 $PYTHON_VERSION，实际 $ACTUAL_PYTHON_VERSION"
+    exit 1
+fi
+info "Python 运行时: $("$PYTHON_BIN" --version)"
+
 cd "$BACKEND_DIR"
 
-# 激活虚拟环境 (如果存在)
-if [ -d "venv" ]; then
-    source venv/bin/activate
-    info "已激活虚拟环境 venv"
-elif [ -d ".venv" ]; then
-    source .venv/bin/activate
-    info "已激活虚拟环境 .venv"
-else
-    warn "未找到虚拟环境 (venv / .venv)，尝试使用系统 Python"
-fi
-
-# 确保依赖已安装（仅在虚拟环境中）
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-    pip install -r requirements.txt -q 2>/dev/null || true
-fi
-
-uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload &
+"$PYTHON_BIN" -m uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload &
 BACKEND_PID=$!
 info "后端已启动 (PID: $BACKEND_PID)"
 
@@ -207,14 +212,7 @@ title "启动 Celery Worker"
 
 cd "$BACKEND_DIR"
 
-# 确保虚拟环境仍激活
-if [ -d "venv" ]; then
-    source venv/bin/activate
-elif [ -d ".venv" ]; then
-    source .venv/bin/activate
-fi
-
-celery -A app.celery_app worker \
+"$PYTHON_BIN" -m celery -A app.celery_app worker \
     --loglevel=info \
     --concurrency="$CELERY_WORKER_CONCURRENCY" \
     -n worker1@%%h &
@@ -223,7 +221,7 @@ info "Celery Worker 已启动 (PID: $CELERY_PID, concurrency=$CELERY_WORKER_CONC
 
 # 可选：启动 Celery Beat 定时调度
 if [ "$ENABLE_CELERY_BEAT" = "true" ]; then
-    celery -A app.celery_app beat --loglevel=info &
+    "$PYTHON_BIN" -m celery -A app.celery_app beat --loglevel=info &
     CELERY_BEAT_PID=$!
     info "Celery Beat 定时调度已启动 (PID: $CELERY_BEAT_PID)"
 else

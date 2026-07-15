@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api/client'
 
-const EMPTY = { id: '', label: '', description: '', folo_keywords: [], search_keywords: [], rss_feed_urls: [], wechat_ids: [], xiaohongshu_ids: [] }
+const EMPTY = { id: '', label: '', description: '', folo_keywords: [], search_keywords: [], rss_feed_urls: [] }
 
 export default function Domains() {
   const [domains, setDomains] = useState([])
@@ -65,8 +65,8 @@ export default function Domains() {
         )}
         {domains.map(d => (
           <div key={d.id} className="surface rounded-2xl p-4 transition-all hover:-translate-y-0.5 hover:border-zinc-300">
-            <div className="flex items-start justify-between mb-3">
-              <div>
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
                 <h3 className="text-sm font-medium text-zinc-900">{d.label}</h3>
                 <span className="text-[11px] font-mono text-zinc-400">id: {d.id}</span>
                 {d.description && <p className="text-xs text-zinc-400 mt-0.5">{d.description}</p>}
@@ -101,18 +101,6 @@ export default function Domains() {
                   <span className="text-zinc-400">{d.rss_feed_urls.length} 个源</span>
                 </div>
               )}
-              {d.wechat_ids?.length > 0 && (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-zinc-300">微信公众号:</span>
-                  <span className="text-zinc-400">{d.wechat_ids.length} 个</span>
-                </div>
-              )}
-              {d.xiaohongshu_ids?.length > 0 && (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-zinc-300">小红书博主:</span>
-                  <span className="text-zinc-400">{d.xiaohongshu_ids.length} 个</span>
-                </div>
-              )}
             </div>
           </div>
         ))}
@@ -127,8 +115,6 @@ function DomainForm({ initial, onSave, onCancel, saving }) {
     folo_keywords: initial.folo_keywords?.join('\n') || '',
     search_keywords: initial.search_keywords?.join('\n') || '',
     rss_feed_urls: initial.rss_feed_urls?.join('\n') || '',
-    wechat_ids: initial.wechat_ids?.join('\n') || '',
-    xiaohongshu_ids: initial.xiaohongshu_ids?.join('\n') || '',
   })
 
   const handleSubmit = (e) => {
@@ -138,8 +124,6 @@ function DomainForm({ initial, onSave, onCancel, saving }) {
       folo_keywords: form.folo_keywords.split('\n').filter(Boolean),
       search_keywords: form.search_keywords.split('\n').filter(Boolean),
       rss_feed_urls: form.rss_feed_urls.split('\n').filter(Boolean),
-      wechat_ids: form.wechat_ids.split('\n').filter(Boolean),
-      xiaohongshu_ids: form.xiaohongshu_ids.split('\n').filter(Boolean),
     })
   }
 
@@ -197,20 +181,6 @@ function DomainForm({ initial, onSave, onCancel, saving }) {
           <label className="block text-xs font-medium text-zinc-500 mb-1">RSS 订阅源 URL（每行一个）</label>
           <textarea rows={3} value={form.rss_feed_urls} onChange={e => set('rss_feed_urls', e.target.value)}
             placeholder="https://example.com/feed"
-            className="control min-h-[96px] w-full resize-none px-3 py-2 text-sm" />
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">微信公众号原始ID（每行一个）</label>
-          <textarea rows={3} value={form.wechat_ids} onChange={e => set('wechat_ids', e.target.value)}
-            placeholder="例如：dxy_dxdoctor"
-            className="control min-h-[96px] w-full resize-none px-3 py-2 text-sm" />
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">小红书用户ID（每行一个）</label>
-          <textarea rows={3} value={form.xiaohongshu_ids} onChange={e => set('xiaohongshu_ids', e.target.value)}
-            placeholder="例如：5d6bxxxx"
             className="control min-h-[96px] w-full resize-none px-3 py-2 text-sm" />
         </div>
       </div>

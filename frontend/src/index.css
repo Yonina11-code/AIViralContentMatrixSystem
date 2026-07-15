@@ -80,6 +80,9 @@ textarea:focus-visible {
   gap: 0.5rem;
   border-radius: 0.875rem;
   font-weight: 650;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
   transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 180ms ease, background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
 

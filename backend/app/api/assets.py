@@ -5,7 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.article import Article
 from app.models.asset_card import AssetCard, AssetCategory
+from app.platform_ops import compute_asset_performance
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
@@ -81,3 +83,19 @@ async def update_card(card_id: str, data: dict, db: AsyncSession = Depends(get_d
 
     await db.commit()
     return {"id": card.id, "version": card.version}
+
+
+@router.post("/recompute-scores")
+async def recompute_asset_scores(db: AsyncSession = Depends(get_db)):
+    articles = (await db.execute(select(Article))).scalars().all()
+    performance = compute_asset_performance(articles)
+    updated = 0
+    for asset_id, row in performance.items():
+        card = await db.get(AssetCard, asset_id)
+        if not card:
+            continue
+        card.score = row["score"]
+        card.usage_count = row["usage_count"]
+        updated += 1
+    await db.commit()
+    return {"updated": updated, "assets": performance}

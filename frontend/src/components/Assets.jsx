@@ -22,6 +22,8 @@ export default function Assets() {
   const [category, setCategory] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newCard, setNewCard] = useState({ name: '', category: 'title_template', content: '' })
+  const [scoring, setScoring] = useState(false)
+  const [scoreMsg, setScoreMsg] = useState('')
 
   const fetchCards = useCallback(async () => {
     setLoading(true)
@@ -49,6 +51,21 @@ export default function Assets() {
     }
   }
 
+  const handleRecomputeScores = async () => {
+    setScoring(true)
+    setScoreMsg('')
+    try {
+      const res = await api.recomputeAssetScores()
+      setScoreMsg(`已更新 ${res.updated} 张资产卡片评分`)
+      fetchCards()
+      setTimeout(() => setScoreMsg(''), 4000)
+    } catch (e) {
+      setScoreMsg('评分更新失败：' + e.message)
+    } finally {
+      setScoring(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -60,6 +77,7 @@ export default function Assets() {
             <p className="mt-1 text-sm text-zinc-500">沉淀标题、开头、案例、规则和写作风格，供生成流程复用。</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+          {scoreMsg && <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">{scoreMsg}</span>}
           <select
             value={category}
             onChange={(e) => setCategory(e.target.value)}
@@ -70,6 +88,13 @@ export default function Assets() {
               <option key={key} value={key}>{label}</option>
             ))}
           </select>
+          <button
+            onClick={handleRecomputeScores}
+            disabled={scoring}
+            className="btn-secondary h-10 px-4 text-sm disabled:opacity-50"
+          >
+            {scoring ? '评分中...' : '重算评分'}
+          </button>
           <button
             onClick={() => setShowCreate(!showCreate)}
             className="btn-primary h-10 px-4 text-sm"

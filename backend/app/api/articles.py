@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import uuid
 from datetime import datetime
 from urllib.parse import quote
@@ -24,7 +25,7 @@ from app.models.content_item import ContentItem
 from app.models.asset_card import AssetCard, AssetCategory
 from app.agents import EditorInChiefAgent, WriterAgent, PublisherAgent, IllustrationEditorAgent, ReviewerAgent
 from app.publishers import WeChatPublisher
-from app.llm import llm_chat, parse_llm_json
+from app.llm import LLMConfigurationError, ensure_llm_configured, llm_chat, parse_llm_json
 
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 editor_in_chief = EditorInChiefAgent()
@@ -35,6 +36,508 @@ reviewer = ReviewerAgent()
 wechat = WeChatPublisher()
 
 
+def _content_quality_score(item: ContentItem) -> int:
+    """Extract collector quality score from tags; non-WeChat sources stay neutral."""
+    if item.source != "wechat":
+        return 60
+    for tag in item.tags or []:
+        if isinstance(tag, str) and tag.startswith("quality:"):
+            try:
+                return int(tag.split(":", 1)[1])
+            except (ValueError, TypeError):
+                return 0
+    return 0
+
+
+def _is_auto_selectable_content(item: ContentItem) -> bool:
+    """Keep automatic generation away from low-quality WeChat health material."""
+    if item.source != "wechat":
+        return True
+    return _content_quality_score(item) >= 75
+
+
+def _sort_content_for_generation(items: list[ContentItem]) -> list[ContentItem]:
+    """Prefer high-quality WeChat material, then newer collected content."""
+    return sorted(
+        items,
+        key=lambda item: (
+            _content_quality_score(item),
+            item.published_at or item.collected_at or datetime.min,
+            item.collected_at or datetime.min,
+        ),
+        reverse=True,
+    )
+
+
+def _trim_text(text: str | None, limit: int = 1200) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "..."
+
+
+def _normalize_lookup_text(text_value: str | None) -> str:
+    if not text_value:
+        return ""
+    return re.sub(r"[\s《》<>【】\[\]（）()|｜:：，,。.!！?？、\-—_]+", "", text_value).lower()
+
+
+def _article_retry_focus(article: Article) -> str:
+    trace = article.agent_trace if isinstance(article.agent_trace, list) else []
+    decision = trace[0] if trace and isinstance(trace[0], dict) else {}
+    topic = decision.get("selected_topic") or article.title
+    angle = decision.get("angle") or ""
+    issues = []
+    if len(trace) > 3 and isinstance(trace[3], dict):
+        review = trace[3].get("second_review") or trace[3].get("review") or {}
+        if isinstance(review, dict):
+            issues = [x.get("detail") or x.get("suggestion") for x in review.get("issues", []) if isinstance(x, dict)]
+    issue_text = "\n".join(f"- {x}" for x in issues[:5] if x)
+    return (
+        f"请基于失败记录重新生成文章。保留原选题：{topic}。\n"
+        f"原角度：{angle}\n"
+        "必须修复上次审核失败的问题，所有具体数字、比较、医学/营养结论都必须来自素材，素材未提供时改成保守表达。"
+        + (f"\n上次失败问题：\n{issue_text}" if issue_text else "")
+    )
+
+
+async def _infer_retry_content_ids(article: Article, db: AsyncSession) -> list[str]:
+    source_ids = article.source_content_ids if isinstance(article.source_content_ids, list) else []
+    if source_ids:
+        return [str(x) for x in source_ids if x]
+
+    trace = article.agent_trace if isinstance(article.agent_trace, list) else []
+    decision = trace[0] if trace and isinstance(trace[0], dict) else {}
+    reference_text = " ".join(str(x) for x in decision.get("source_references", []) if x)
+    haystack = _normalize_lookup_text(" ".join([reference_text, decision.get("reason", "")]))
+    if not haystack:
+        return []
+
+    rows = (await db.execute(select(ContentItem).order_by(ContentItem.collected_at.desc()).limit(300))).scalars().all()
+    matched: list[str] = []
+    for item in rows:
+        title_key = _normalize_lookup_text(item.title)
+        source_key = _normalize_lookup_text(item.source_name)
+        if title_key and (title_key in haystack or haystack in title_key):
+            matched.append(item.id)
+        elif source_key and source_key in haystack and title_key and any(part and part in haystack for part in re.split(r"[，,：:|｜]", item.title)):
+            matched.append(item.id)
+        if len(matched) >= 5:
+            break
+    return matched
+
+
+def _build_source_materials(items: list[ContentItem]) -> str:
+    """Build grounded source excerpts for the writer instead of passing titles only."""
+    if not items:
+        return "无可用参考素材正文。请只做保守、常识性表达，不编造具体数字或来源。"
+
+    blocks = []
+    for idx, item in enumerate(items[:8], 1):
+        excerpt = _trim_text(item.body or item.summary, limit=1400)
+        if not excerpt:
+            excerpt = "（该素材没有正文摘录；只能引用其标题和来源，不得补写具体数字或机构结论。）"
+        blocks.append(
+            "\n".join([
+                f"### 素材 {idx}",
+                f"- 标题：{item.title}",
+                f"- 来源：{item.source_name or item.source}",
+                f"- 领域：{item.domain}",
+                f"- 链接：{item.url or '无'}",
+                f"- 摘录：{excerpt}",
+            ])
+        )
+    return "\n\n".join(blocks)
+
+
+def _normalize_claim_plan(decision: dict, source_materials: str | None) -> dict:
+    """Ensure writer receives a source-grounded claim plan, with risky mechanisms downgraded."""
+    raw_plan = decision.get("claim_plan") if isinstance(decision.get("claim_plan"), dict) else {}
+    text_to_check = "\n".join([
+        decision.get("selected_topic", ""),
+        decision.get("angle", ""),
+        raw_plan.get("core_claim", ""),
+        " ".join(raw_plan.get("must_not_claim", []) or []),
+    ])
+    source = source_materials or ""
+    source_norm = _normalize_claim_text(source)
+
+    plan = {
+        "core_claim": raw_plan.get("core_claim") or decision.get("angle") or decision.get("selected_topic", ""),
+        "supported_by_source": bool(raw_plan.get("supported_by_source", True)),
+        "must_not_claim": list(raw_plan.get("must_not_claim") or []),
+    }
+
+    glucose_terms = re.compile(r"(白粥|粥|米饭|碳水|血糖|升糖|胰岛素|糖尿病)")
+    source_has_glucose_support = any(term in source_norm for term in ["血糖", "升糖", "胰岛素", "糖尿病", "碳水"])
+    if glucose_terms.search(text_to_check) and not source_has_glucose_support:
+        plan["supported_by_source"] = False
+        plan["core_claim"] = (
+            "素材未支持血糖或胰岛素机制；只能围绕素材中的控盐、隐形盐、控油、"
+            "高油素食、饮食均衡、规律服药和必要时咨询医生来写。"
+        )
+        plan["must_not_claim"].extend([
+            "不要写白粥升糖导致血压波动",
+            "不要写胰岛素促进钠重吸收导致血压上升",
+            "不要把血糖/胰岛素机制作为主线",
+        ])
+
+    oil_sodium_terms = re.compile(r"(食用油|植物油|花生油|调味油|复合油).{0,30}(隐形钠|含钠|含盐|加盐)")
+    if oil_sodium_terms.search(text_to_check) and not _source_supports_oil_sodium_claim(source):
+        plan["supported_by_source"] = False
+        plan["core_claim"] = (
+            "素材未支持食用油是隐形钠来源；如果写厨房用油，只能围绕控油、"
+            "高油饮食、血脂、血管状态和烹饪方式来写。"
+        )
+        plan["must_not_claim"].extend([
+            "不要写食用油本身是隐形钠来源",
+            "不要写调味油或复合油含钠会影响血压，除非素材明确提供",
+        ])
+
+    takeaway_terms = re.compile(r"(外卖|酸菜鱼|麻辣烫|黄焖鸡|调料包|调味包|酱料包|汤底)")
+    unsupported_takeaway_comparison = re.compile(r"(半天的盐|一天推荐量的一半|全天推荐摄入量的一半|一半|十倍|多一倍|比[^，。！？!?；;]{1,16}(?:还|更)(?:咸|高|多))")
+    source_has_takeaway_support = any(term in source_norm for term in ["外卖", "酸菜鱼", "麻辣烫", "黄焖鸡", "调料包", "酱料包", "汤底"])
+    if takeaway_terms.search(text_to_check) and unsupported_takeaway_comparison.search(text_to_check) and not source_has_takeaway_support:
+        plan["supported_by_source"] = False
+        plan["core_claim"] = (
+            "素材未支持外卖、调料包或汤底的具体钠含量比较；如果写外卖场景，"
+            "只能作为控盐/隐形盐的生活化演绎，提醒少用酱料、少喝汤、看配料和控制总钠摄入。"
+        )
+        plan["must_not_claim"].extend([
+            "不要写外卖有半天的盐",
+            "不要写一份外卖接近或超过全天推荐摄入量的一半",
+            "不要写酸菜鱼、麻辣烫、黄焖鸡等外卖品类的钠含量强比较",
+            "不要写比鸡汤咸十倍或类似倍数标题",
+        ])
+
+    cold_dish_terms = re.compile(r"(凉拌菜|凉菜|拍黄瓜|拌黄瓜|凉拌)")
+    sauce_salt_terms = re.compile(r"(酱料|生抽|酱油|蚝油|辣椒酱|卤汁|豆瓣酱).{0,40}(钠|盐|含钠|含盐|隐形盐)")
+    source_has_cold_dish_support = any(term in source_norm for term in ["凉拌菜", "凉菜", "拍黄瓜", "拌黄瓜", "凉拌", "蚝油", "辣椒酱", "卤汁"])
+    if cold_dish_terms.search(text_to_check) and sauce_salt_terms.search(text_to_check) and not source_has_cold_dish_support:
+        plan["supported_by_source"] = False
+        plan["core_claim"] = (
+            "素材只支持控盐、少放酱油/味精/豆瓣酱和警惕隐形盐；凉拌菜只能作为生活化场景切入，"
+            "不能写成素材已证明的凉拌菜酱料钠含量营养结论。"
+        )
+        plan["must_not_claim"].extend([
+            "不要把凉拌菜酱料写成素材已证明的隐形盐大户或营养结论",
+            "不要写凉拌菜里的盐/钠比炒菜、热汤面或其他菜更多",
+            "不要写生抽、蚝油、辣椒酱、卤汁的具体钠含量或毫克数，除非素材明确提供",
+            "不要用口干、喝水、眼皮浮肿、手指发胀来判断钠摄入偏高",
+            "凉拌菜只能作为控盐场景，核心建议应回到少放酱油、味精、豆瓣酱和查看配料/营养成分表",
+        ])
+
+    plan["must_not_claim"] = list(dict.fromkeys([item for item in plan["must_not_claim"] if item]))
+    return plan
+
+
+def _normalize_generated_title(written: dict, decision: dict) -> str:
+    """Keep malformed writer output from using a body paragraph as the article title."""
+    title = (written.get("title") or "").strip()
+    candidates = [c for c in (decision.get("suggested_title_candidates") or []) if isinstance(c, str) and c.strip()]
+    fallback = candidates[0].strip() if candidates else (decision.get("selected_topic") or "未命名文章").strip()
+
+    sentence_count = len(re.findall(r"[。！？!?]", title))
+    if not title or len(title) > 48 or sentence_count >= 2 or "\n" in title:
+        return fallback
+    return title
+
+
+def _normalize_claim_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "").lower()
+
+
+def _find_unsupported_precise_claims(text: str, source_materials: str | None) -> list[str]:
+    """Find health-sensitive exact numbers in generated text that are absent from source excerpts."""
+    if not text:
+        return []
+
+    source_norm = _normalize_claim_text(source_materials or "")
+    claim_pattern = re.compile(
+        r"\d+(?:\.\d+)?\s*(?:到|至|~|-|—|－)?\s*\d*(?:\.\d+)?\s*"
+        r"(?:毫克|mg|克|g|%|％|mmhg|毫米汞柱|毫升|ml|周|天|个月|年)",
+        re.IGNORECASE,
+    )
+    health_context_pattern = re.compile(
+        r"(钠|盐|酱油|血压|高血压|低盐|减盐|薄盐|控盐|膳食|营养|味蕾|心率|酒精|药|症状)"
+    )
+
+    unsupported: list[str] = []
+    seen: set[str] = set()
+    label_basis_units = {
+        "100克", "100g", "100毫升", "100ml",
+        "每100克", "每100g", "每100毫升", "每100ml",
+    }
+    for match in claim_pattern.finditer(text):
+        claim = match.group(0).strip()
+        if _normalize_claim_text(claim) in {_normalize_claim_text(unit) for unit in label_basis_units}:
+            continue
+        start = max(0, match.start() - 24)
+        end = min(len(text), match.end() + 24)
+        context = text[start:end]
+        if not health_context_pattern.search(context):
+            continue
+        claim_norm = _normalize_claim_text(claim)
+        if claim_norm and claim_norm not in source_norm and claim_norm not in seen:
+            unsupported.append(claim)
+            seen.add(claim_norm)
+    return unsupported
+
+
+def _split_claim_sentences(text: str) -> list[str]:
+    return [
+        part.strip()
+        for part in re.split(r"(?<=[。！？!?；;])\s*|\n+", text or "")
+        if part.strip()
+    ]
+
+
+def _source_supports_oil_sodium_claim(source_materials: str | None) -> bool:
+    source = source_materials or ""
+    oil_terms = r"(食用油|植物油|花生油|橄榄油|亚麻籽油|核桃油|紫苏油|调味油|复合油|炒菜油|厨房用油)"
+    sodium_terms = r"(钠|含钠|盐|含盐|隐形钠|隐形盐)"
+    for sentence in _split_claim_sentences(source):
+        if re.search(oil_terms, sentence) and re.search(sodium_terms, sentence):
+            return True
+    return False
+
+
+def _find_unsupported_core_claims(text: str, source_materials: str | None) -> list[str]:
+    """Find generated core health claims that shift beyond the selected source material."""
+    if not text or not source_materials:
+        return []
+
+    unsupported: list[str] = []
+    seen: set[str] = set()
+    oil_terms = r"(食用油|植物油|花生油|橄榄油|亚麻籽油|核桃油|紫苏油|调味油|复合油|炒菜油|厨房用油|那瓶油)"
+    sodium_terms = r"(隐形钠|含钠|钠含量|含盐|加盐|含钠添加剂)"
+    source_supports_oil_sodium = _source_supports_oil_sodium_claim(source_materials)
+
+    for sentence in _split_claim_sentences(text):
+        if re.search(oil_terms, sentence) and re.search(sodium_terms, sentence) and not source_supports_oil_sodium:
+            normalized = _normalize_claim_text(sentence)
+            if normalized not in seen:
+                unsupported.append(sentence)
+                seen.add(normalized)
+
+    return unsupported
+
+
+def _find_unsupported_relative_claims(text: str, source_materials: str | None) -> list[str]:
+    """Find unsupported comparative health claims such as倍数、超过一半、比某菜更高."""
+    if not text or not source_materials:
+        return []
+
+    source_norm = _normalize_claim_text(source_materials)
+    unsupported: list[str] = []
+    seen: set[str] = set()
+    salt_context = re.compile(r"(盐|钠|咸|控盐|减盐|低盐|高血压|血压|调料|调味|生抽|酱油|蚝油|凉拌菜|外卖|酸菜鱼|麻辣烫|汤底|酱料|酱料包|粉包|泡面|面饼)")
+    relative_patterns = [
+        r"[^。！？!?；;\n]{0,24}(?:超过|超出|远高于|接近|比|占到|高出|多出)[^。！？!?；;\n]{0,24}(?:一倍|两倍|十倍|几倍|半天|半|一半|三分之一|六成|七成|八成|推荐量|推荐摄入量|回锅肉|热汤面|薯片|咸菜|鸡汤|面饼)[^。！？!?；;\n]{0,24}",
+        r"[^。！？!?；;\n]{0,24}(?:半天的盐|一天推荐量的一半|全天推荐摄入量的一半|推荐摄入量一半)[^。！？!?；;\n]{0,24}",
+        r"[^。！？!?；;\n]{0,24}(?:比[^。！？!?；;\n]{1,12}(?:还|更)(?:高|多|咸))[^。！？!?；;\n]{0,24}",
+        r"[^。！？!?；;\n]{0,24}(?:最容易|最常见|大户|推手)[^。！？!?；;\n]{0,24}",
+    ]
+
+    for pattern in relative_patterns:
+        for match in re.finditer(pattern, text):
+            claim = match.group(0).strip(" ，。！？!?；;\n")
+            if not claim or not salt_context.search(claim):
+                continue
+            claim_norm = _normalize_claim_text(claim)
+            if claim_norm in source_norm or claim_norm in seen:
+                continue
+            unsupported.append(claim)
+            seen.add(claim_norm)
+    return unsupported
+
+
+def _apply_source_boundary_fallback(written: dict, unsupported_claims: list[str]) -> dict:
+    """Deterministically soften source-unsupported numeric claims after LLM repair."""
+    if not unsupported_claims:
+        return written
+
+    updated = dict(written)
+    title = updated.get("title", "")
+    body = updated.get("body", "")
+    summary = updated.get("summary", "")
+
+    has_oil_sodium_claim = any(re.search(r"(油|花生油|橄榄油|调味油|复合油).{0,20}(钠|盐|隐形钠|含钠)", claim) for claim in unsupported_claims)
+    if has_oil_sodium_claim:
+        title = title.replace("比酱油更影响你的血压", "也会影响你的血压管理")
+        title = title.replace("可能比酱油更值得你关注", "也值得你关注")
+        body = re.sub(r"##\s*你以为在吃油，其实可能在吃[“\"]隐形钠[”\"]", "## 控盐之外，控油也别忽略", body)
+        body = re.sub(r"先别急着把油瓶扔了。.*?如果每100克含钠量较高，那就得留个心眼了——它可能比你想象的更[“\"]咸[”\"]。", "先别急着把油瓶扔了。素材真正提醒我们的不是“油里藏着多少钠”，而是高油饮食同样会拖累血脂和血管状态。植物油、坚果、油炸豆制品这些看起来不咸的食物，如果吃得太多，也可能让血压管理变得更难。所以下次做饭时，除了少放盐，也要留意油放了多少、怎么烹饪。", body, flags=re.DOTALL)
+        body = re.sub(r"有些油本身就可能含钠。", "高油饮食本身就值得留意。", body)
+        body = re.sub(r"市面上很多调味油、复合油、甚至某些[“\"]炒菜香[”\"]的花生油，在生产过程中会加入盐或其他含钠添加剂来提升风味。", "一些调味油、复合油的配料更复杂，购买时可以顺手看一眼配料表和营养成分表。", body)
+        body = re.sub(r"不同品牌含钠量可能存在差异，有的每100克含钠量能差出不少。", "不同品牌配方可能存在差异，建议购买时查看配料表和营养成分表。", body)
+        body = re.sub(r"就算每克油含钠很少，累积起来也不容小觑。", "油本身热量高，用量一多也不容小觑。", body)
+        body = body.replace("翻到背面看营养成分表，重点看“钠”那一栏。", "翻到背面看配料表和营养成分表。")
+        body = body.replace("下次打开厨房柜门的时候，不妨多看一眼那瓶油——它可能比酱油更值得你关注。", "下次打开厨房柜门的时候，不妨多看一眼那瓶油——用油习惯也值得你关注。")
+        summary = re.sub(r"油的[“\"]隐形钠[”\"]、?", "", summary)
+        summary = summary.replace("厨房用油对血压的影响", "厨房用油习惯对血压管理的影响")
+        if "用油习惯" not in summary:
+            summary = "本文提醒关注厨房用油习惯、高温烹饪和高油饮食对血压管理的影响，并给出更稳妥的选油和用油建议。"
+        if "高油饮食" not in body:
+            body = body.replace("## 控盐之外，控油也别忽略", "## 控盐之外，控油也别忽略\n\n高油饮食会通过血脂、体重和血管状态，间接影响血压管理。")
+
+    title = re.sub(r"[:：]?这些食品的盐比薯片还多", "：这些食品可能藏着不少盐", title)
+    title = title.replace("比薯片还多", "可能并不低")
+    title = re.sub(r"那碟凉拌菜里的盐，比你想象的多一倍", "那碟凉拌菜，可能没有你想的那么清淡", title)
+    title = title.replace("比你想象的多一倍", "可能比你想的多")
+    title = re.sub(r"外卖小哥递过来的不只是饭，还有半天的盐", "点外卖时，调料包和汤底要多留意", title)
+    title = re.sub(r"那碗酸菜鱼里的汤，可能比[^，。！？!?；;]{1,16}咸十倍", "那碗酸菜鱼里的汤，可能比你想的更该少喝", title)
+    title = title.replace("半天的盐", "不少隐形盐")
+    title = re.sub(r"一片吐司下肚，你吃进去的钠可能比半碗挂面还多", "加工主食里的钠，可能比你想象中多", title)
+    title = re.sub(r"一片面包里的钠，可能比你炒菜放的盐还多", "一片面包里的钠，可能比你想象中多", title)
+
+    body = re.sub(r"钠的?摄入量可能比炒一盘回锅肉还高", "钠摄入可能比你想象中高", body)
+    title = re.sub(r"凉拌菜里那勺盐，比你想象的可能要多", "凉拌菜看着清爽，调味料也别忽略", title)
+    title = re.sub(r"凉拌菜里那勺盐，?可能比你炒菜加的还多", "凉拌菜看着清爽，调味料也别忽略", title)
+    body = re.sub(r"##\s*酱料才是真正的[“\"]?隐形盐大户[”\"]?", "## 看着清爽，也别忽略调味料", body)
+    body = re.sub(r"酱料才是真正的[“\"]?隐形盐大户[”\"]?", "调味料也值得留意", body)
+    body = re.sub(r"有的生抽每?\s*\d+\s*(?:毫升|ml|mL)[^。！？!?；;]*。", "不同调味品的配方差异很大，使用前可以看一眼配料表和营养成分表。", body)
+    body = re.sub(r"有的生抽[^。！？!?；;]*(?:\d+多?毫克|\d+\s*mg)[^。！？!?；;]*。", "不同调味品的配方差异很大，使用前可以看一眼配料表和营养成分表。", body, flags=re.IGNORECASE)
+    body = re.sub(r"凉拌菜的钠可能比[^。！？!?；;]{1,18}(?:还|更)?(?:多|高|咸)[^。！？!?；;]*。", "凉拌菜本身可以很清爽，但调味料用量仍然要留意。", body)
+    body = re.sub(r"如果你吃完凉拌菜后[^。！？!?；;]*(?:口干|想喝水|眼皮|手指|发胀|浮肿)[^。！？!?；;]*。", "如果你需要控制血压或日常盐摄入，更稳妥的做法是少放酱油、味精、豆瓣酱，并留意加工食品里的隐形盐。", body)
+    summary = re.sub(r"凉拌菜里的盐可能比你想象中多", "凉拌菜看着清爽，但调味料也要留意", summary)
+    summary = re.sub(r"吃完[^。！？!?；;]*(?:口干|想喝水|眼皮|手指|发胀|浮肿)[^。！？!?；;]*。?", "", summary)
+    body = re.sub(r"钠含量可能比一碗热汤面还高", "钠含量可能并不低", body)
+    body = re.sub(r"钠摄入总量可能比一个正常吃咸菜的人还高", "钠摄入总量可能比你想象中高", body)
+    body = re.sub(r"那两片吐司里的钠，可能比你中午炒菜放的盐还多", "那两片吐司里的钠，可能比你想象中多", body)
+    body = re.sub(r"一片吐司[^。！？!?；;]*比半碗挂面还多", "加工主食里的钠，可能比你想象中多", body)
+    body = re.sub(r"可能是超过一天推荐摄入量一半的钠", "可能已经摄入了不少钠", body)
+    body = re.sub(r"超过一天推荐摄入量一半的钠", "不少钠", body)
+    body = re.sub(r"每100克含钠明显偏高，可以算作相对低钠的选择。", "可以对比不同产品，优先选择钠含量较低的那一款。", body)
+    body = re.sub(r"尽量选每100克钠含量在明显偏高以下的。", "尽量选同类产品里钠含量较低的。", body)
+    body = re.sub(r"选择每100克钠含量明显偏高的([^，。！？!?；;]*)", r"选择钠含量较低的\1", body)
+    body = re.sub(r"里面的盐可能已经接近一天推荐量的一半", "里面的盐可能已经不少", body)
+    body = re.sub(r"接近(?:或超过)?(?:一|全)天推荐(?:摄入)?量的一半", "已经不少", body)
+    body = re.sub(r"还有一个补救办法：额外加一份蔬菜。", "更稳妥的做法，是少喝汤、少用酱料，再搭配一份蔬菜。", body)
+    body = re.sub(r"蔬菜里含有钾，钾能帮助身体代谢多余的钠，辅助平衡钠钾摄入。", "蔬菜能增加钾和膳食纤维摄入，让这一餐更均衡；但它不能抵消已经吃进去的盐。", body)
+    body = re.sub(r"可以用这种方式帮身体代谢一下", "可以把下一餐吃得更清淡一些", body)
+    body = re.sub(r"搭配一些高钾食物[^。！？!?]*可以帮助身体排出多余的钠。", "搭配蔬菜和水果能让这一餐更均衡，但不能抵消已经吃进去的盐。", body)
+    body = re.sub(r"高钾食物[^。！？!?]*帮助身体排出多余的钠", "搭配蔬菜和水果让饮食更均衡", body)
+    body = re.sub(r"酱料包[^。！？!?]*钠含量[^。！？!?]*比面饼[^。！？!?]*。", "酱料包和汤底同样值得留意，不能只盯着面饼。", body)
+    body = re.sub(r"一些产品里，酱料包和粉包加起来的钠含量[^。！？!?]*。", "不同产品差异很大，酱料包、粉包和面饼都要看营养成分表。", body)
+    body = re.sub(r"常见泡面每百克钠含量通常在[^。！？!?]*。", "不同品牌、不同口味的泡面钠含量差异很大。", body)
+    body = re.sub(r"泡面时，酱料包只放[^。！？!?]*。", "泡面时，酱料包可以先少放一点，尝过之后再决定要不要继续加。", body)
+    body = re.sub(r"下次泡面时，[^。！？!?]*只放一半[^。！？!?]*。", "下次泡面时，可以先少放一点酱料，尝过之后再调整。", body)
+    body = re.sub(r"用开水涮一下酱料包再挤[^。！？!?]*。", "如果想控盐，更直接的做法是少放酱料、少喝汤。", body)
+    body = re.sub(r"这样能冲掉一部分盐分[^。！？!?]*。?", "", body)
+    summary = re.sub(r"凉拌菜里的盐可能比[^，。！？!?；;]+还高", "凉拌菜里的盐可能比你想象中多", summary)
+    summary = summary.replace("用额外蔬菜帮助代谢钠摄入", "搭配蔬菜并控制总钠摄入")
+    summary = summary.replace("帮助代谢钠摄入", "让这一餐更均衡")
+    summary = summary.replace("搭配高钾食物帮助身体排出多余的钠", "搭配蔬菜并控制总钠摄入")
+    summary = summary.replace("帮助身体排出多余的钠", "让饮食更均衡")
+    summary = summary.replace("可以轻松减少钠摄入", "有助于减少不必要的钠摄入")
+
+    numeric_claims = [
+        claim for claim in unsupported_claims
+        if not re.search(r"100\s*(?:克|g|毫升|ml)", claim, re.IGNORECASE)
+        and not re.search(r"(酱料包|粉包|泡面|面饼|一半|三分之一|六成|数百|上千)", claim)
+    ]
+    for claim in numeric_claims:
+        escaped = re.escape(claim)
+        body = re.sub(
+            rf"每份（通常是[^）]*{escaped}[^）]*）的钠含量是多少毫克",
+            "每份钠含量是多少",
+            body,
+            flags=re.IGNORECASE,
+        )
+        body = re.sub(
+            rf"看每份（通常是[^）]*{escaped}[^）]*）的含量",
+            "看每份钠含量",
+            body,
+            flags=re.IGNORECASE,
+        )
+        body = re.sub(
+            rf"每份（通常是[^）]*{escaped}[^）]*）",
+            "每份",
+            body,
+            flags=re.IGNORECASE,
+        )
+        body = re.sub(
+            rf"(?:超过|高于|低于|达到|约|大约)?\s*{escaped}\s*(?:/\s*100\s*(?:g|克))?",
+            "明显偏高",
+            body,
+            flags=re.IGNORECASE,
+        )
+        summary = re.sub(
+            rf"(?:超过|高于|低于|达到|约|大约)?\s*{escaped}\s*(?:/\s*100\s*(?:g|克))?",
+            "明显偏高",
+            summary,
+            flags=re.IGNORECASE,
+        )
+
+    body = re.sub(r"许多蚝油产品每明显偏高里?的钠含量[^。]*。", "许多蚝油产品的钠含量并不低。", body)
+    body = re.sub(r"每明显偏高里?的钠含量", "钠含量", body)
+    body = re.sub(r"每明显偏高", "", body)
+    body = re.sub(r"快明显偏高", "不少", body)
+    body = re.sub(r"([^。！？!?；;]{0,18})钠含量可达明显偏高", r"\1钠含量可能较高", body)
+    body = re.sub(r"钠含量甚至达到每100克明显偏高以上", "钠含量可能较高", body)
+    body = re.sub(r"每日减少明显偏高盐的摄入，血压可能下降明显偏高", "减少盐摄入有助于血压管理", body)
+    body = re.sub(r"一汤匙酱油大约含明显偏高盐", "一汤匙酱油含盐量不低", body)
+    body = re.sub(r"可能明显偏高", "可能比你想象中多", body)
+    body = re.sub(r"每100克含钠明显偏高，可以算作相对低钠的选择。", "可以对比不同产品，优先选择钠含量较低的那一款。", body)
+    body = re.sub(r"尽量选每100克钠含量在明显偏高以下的。", "尽量选同类产品里钠含量较低的。", body)
+    body = re.sub(r"选择每100克钠含量明显偏高的([^，。！？!?；;]*)", r"选择钠含量较低的\1", body)
+    body = re.sub(r"每份（通常是(?:明显偏高)(?:或明显偏高)+）的钠含量是多少毫克", "每份钠含量是多少", body)
+    body = re.sub(r"看每份（通常是明显偏高）?的含量", "看每份钠含量", body)
+    body = re.sub(r"每份（通常是明显偏高(?:或明显偏高)*）", "每份", body)
+    summary = re.sub(r"每明显偏高", "", summary)
+    summary = re.sub(r"快明显偏高", "不少", summary)
+    summary = re.sub(r"选择每100克钠含量明显偏高的([^，。！？!?；;]*)", r"选择钠含量较低的\1", summary)
+    summary = summary.replace("每100克钠含量明显偏高", "钠含量较低")
+
+    body = re.sub(r"如果每100克钠含量明显偏高，建议放回去。", "如果钠含量明显偏高，建议谨慎选择。", body)
+    body = re.sub(r"钠含量明显偏高/100g", "钠含量明显偏高", body, flags=re.IGNORECASE)
+    summary = re.sub(r"钠含量明显偏高就放回去", "钠含量明显偏高就谨慎选择", summary)
+    summary = re.sub(r"钠含量明显偏高/100g", "钠含量明显偏高", summary, flags=re.IGNORECASE)
+
+    updated["title"] = title
+    updated["body"] = body
+    updated["summary"] = summary
+    existing_changes = updated.get("changes", "")
+    fallback_note = "本地来源边界校验已将素材未支撑的具体数字改为定性表达。"
+    updated["changes"] = f"{existing_changes}\n{fallback_note}".strip()
+    return updated
+
+
+def _append_source_boundary_issues(review_result: dict, written: dict, source_materials: str | None) -> dict:
+    if not source_materials:
+        return review_result
+
+    text = "\n".join([
+        written.get("title", ""),
+        written.get("body", ""),
+        written.get("summary", "") or "",
+    ])
+    unsupported = _find_unsupported_precise_claims(text, source_materials)
+    unsupported_core = _find_unsupported_core_claims(text, source_materials)
+    unsupported_relative = _find_unsupported_relative_claims(text, source_materials)
+    unsupported_all = unsupported + unsupported_core + unsupported_relative
+    if not unsupported_all:
+        return review_result
+
+    issues = list(review_result.get("issues", []))
+    detail = "素材未提供这些健康/营养具体数字或核心论点，请删除、改成素材支持的表达：" + "、".join(unsupported_all[:8])
+    if detail not in {issue.get("detail") for issue in issues}:
+        issues.append({
+            "type": "factual_error",
+            "severity": "blocker",
+            "location": "标题/正文/摘要中的具体数字",
+            "detail": detail,
+            "suggestion": "不得编造包装实测数字或素材没有的核心论点；如果素材只支持控油，请回到“高油饮食、血脂、血管、烹饪方式”等稳妥表达。",
+        })
+    updated = dict(review_result)
+    updated["issues"] = issues
+    updated["passed"] = False
+    return updated
+
+
 async def _summarize_content_pool(
     db: AsyncSession,
     domain: str | None = None,
@@ -43,18 +546,21 @@ async def _summarize_content_pool(
     """从 Content Pool 中生成摘要用于总编决策，排除已使用过的内容（若指定了特定的 item_ids 则直接使用它们作为数据源）"""
     if item_ids:
         query = select(ContentItem).where(ContentItem.id.in_(item_ids))
+        rows = (await db.execute(query)).scalars().all()
     else:
         query = select(ContentItem).where(ContentItem.used_at.is_(None)).order_by(ContentItem.collected_at.desc())
         if domain:
             query = query.where(ContentItem.domain == domain)
-        query = query.limit(30)
-        
-    rows = (await db.execute(query)).scalars().all()
+        query = query.limit(100)
+        rows = (await db.execute(query)).scalars().all()
+        rows = _sort_content_for_generation([r for r in rows if _is_auto_selectable_content(r)])[:30]
+
     if not rows:
         return "暂无采集数据", []
     summaries = []
     for r in rows:
-        summaries.append(f"- [{r.source}] {r.title} (ID: {r.id}, 来源: {r.source_name}, 领域: {r.domain})")
+        quality_note = f", 质量分: {_content_quality_score(r)}" if r.source == "wechat" else ""
+        summaries.append(f"- [{r.source}] {r.title} (ID: {r.id}, 来源: {r.source_name}, 领域: {r.domain}{quality_note})")
     return "\n".join(summaries), rows
 
 
@@ -72,7 +578,10 @@ async def _summarize_assets(db: AsyncSession) -> str:
         return "可用模板：暂无，Agent 将自行创作"
     summaries = []
     for r in rows:
-        summaries.append(f"- [{r.category.value}] {r.name} (评分: {r.score})")
+        excerpt = (r.content or "").strip().replace("\n", " ")
+        if len(excerpt) > 240:
+            excerpt = excerpt[:240].rstrip() + "..."
+        summaries.append(f"- ID:{r.id} [{r.category.value}] {r.name} (评分: {r.score}, 使用: {r.usage_count})：{excerpt}")
     return "\n".join(summaries)
 
 
@@ -83,15 +592,20 @@ async def _list_recent_article_titles(db: AsyncSession, limit: int = 20) -> list
     return rows
 
 
-async def _review_and_repair_written(written: dict, review_agent: ReviewerAgent) -> tuple[dict, dict, bool]:
+async def _review_and_repair_written(
+    written: dict,
+    review_agent: ReviewerAgent,
+    source_materials: str | None = None,
+) -> tuple[dict, dict, bool]:
     """Review raw Markdown, repair blockers once, then recheck before article creation."""
     review_result = await review_agent.check(
         title=written.get("title", ""),
         body=written.get("body", ""),
         summary=written.get("summary", ""),
     )
+    review_result = _append_source_boundary_issues(review_result, written, source_materials)
     review_trace = {"review": review_result}
-    if review_result["passed"]:
+    if review_result["passed"] and not _has_repairable_review_issues(review_result):
         return written, review_trace, True
 
     fixed = await review_agent.fix(
@@ -104,6 +618,18 @@ async def _review_and_repair_written(written: dict, review_agent: ReviewerAgent)
     repaired["title"] = fixed["title"]
     repaired["body"] = fixed["body"]
     repaired["summary"] = fixed["summary"]
+    if source_materials:
+        repaired_text = "\n".join([repaired.get("title", ""), repaired.get("body", ""), repaired.get("summary", "") or ""])
+        remaining_unsupported = (
+            _find_unsupported_precise_claims(repaired_text, source_materials)
+            + _find_unsupported_core_claims(repaired_text, source_materials)
+            + _find_unsupported_relative_claims(repaired_text, source_materials)
+        )
+        fallback_fixed = _apply_source_boundary_fallback({**fixed, **repaired}, remaining_unsupported)
+        repaired["title"] = fallback_fixed["title"]
+        repaired["body"] = fallback_fixed["body"]
+        repaired["summary"] = fallback_fixed["summary"]
+        fixed = fallback_fixed
     review_trace["fixed"] = fixed
 
     second_review = await review_agent.check(
@@ -111,8 +637,18 @@ async def _review_and_repair_written(written: dict, review_agent: ReviewerAgent)
         body=repaired.get("body", ""),
         summary=repaired.get("summary", ""),
     )
+    second_review = _append_source_boundary_issues(second_review, repaired, source_materials)
     review_trace["second_review"] = second_review
     return repaired, review_trace, second_review["passed"]
+
+
+def _has_repairable_review_issues(review_result: dict) -> bool:
+    """Repair health/factual warnings once so drafts do not silently keep risky claims."""
+    repairable_types = {"factual_error", "medical_safety", "compliance"}
+    for issue in review_result.get("issues", []):
+        if issue.get("type") in repairable_types and issue.get("severity") in {"warning", "blocker"}:
+            return True
+    return False
 
 
 from pydantic import BaseModel
@@ -123,12 +659,40 @@ class GenerateParams(BaseModel):
     focus: str | None = None
 
 
+class IllustrationUploadParams(BaseModel):
+    type: str  # "cover" 或者索引数字如 "0", "1"
+    image_url: str
+
+
+class ArticleBatchDeleteRequest(BaseModel):
+    ids: list[str]
+
+
+def _normalize_batch_delete_ids(ids: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in ids:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    if not normalized:
+        raise ValueError("ids 不能为空")
+    return normalized
+
+
 @router.post("/generate")
 async def generate_article(
     params: GenerateParams,
     db: AsyncSession = Depends(get_db),
 ):
     """根据自定义素材或全自动选题生成一篇文章：总编 -> 正文 -> 审核 -> 发布"""
+    try:
+        ensure_llm_configured()
+    except LLMConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     domain = params.domain
     item_ids = params.item_ids
     focus = params.focus
@@ -179,10 +743,22 @@ async def generate_article(
     angle = decision.get("angle", "深度分析")
     title_candidates = decision.get("suggested_title_candidates", [topic])
     source_refs = decision.get("source_references", [])
-    written = await writer.write(topic, angle, title_candidates, asset_summary, "\n".join(source_refs), domain=domain)
+    source_materials = _build_source_materials(pool_items)
+    claim_plan = _normalize_claim_plan(decision, source_materials)
+    decision["claim_plan"] = claim_plan
+    written = await writer.write(
+        topic,
+        angle,
+        title_candidates,
+        asset_summary,
+        source_materials,
+        domain=domain,
+        claim_plan=claim_plan,
+    )
+    written["title"] = _normalize_generated_title(written, decision)
 
     # Step 3: 文稿安全与事实边界审核。先审 Markdown，修稿后必须复审通过。
-    written, review_trace, review_passed = await _review_and_repair_written(written, reviewer)
+    written, review_trace, review_passed = await _review_and_repair_written(written, reviewer, source_materials=source_materials)
     if not review_passed:
         prepared_failed = publisher_agent.prepare(
             title=written.get("title", topic),
@@ -195,6 +771,7 @@ async def generate_article(
             body=prepared_failed["body"],
             summary=prepared_failed["summary"],
             status=ArticleStatus.FAILED,
+            source_content_ids=[item.id for item in pool_items],
             agent_trace=[decision, written, {}, review_trace],
         )
         db.add(failed_article)
@@ -244,17 +821,15 @@ async def generate_article(
         body=prepared["body"],
         summary=prepared["summary"],
         status=ArticleStatus.DRAFT,
+        source_content_ids=[item.id for item in pool_items],
         agent_trace=[decision, written, illus_trace, review_trace],
     )
     db.add(article)
 
-    # Step 7: 标记被引用的素材为「已用」，通过标题匹配 source_references
-    if source_refs:
-        refs_text = " ".join(source_refs).lower()
-        now = datetime.utcnow()
-        for item in pool_items:
-            if item.title.lower() in refs_text:
-                item.used_at = now
+    # Step 7: 标记本次参与生成的素材为「已用」；避免依赖模型返回的引用标题做脆弱匹配。
+    now = datetime.utcnow()
+    for item in pool_items:
+        item.used_at = now
     await db.commit()
 
     return {
@@ -265,6 +840,29 @@ async def generate_article(
         "status": article.status,
         "decision": decision,
     }
+
+
+@router.post("/{article_id}/regenerate")
+async def regenerate_failed_article(article_id: str, db: AsyncSession = Depends(get_db)):
+    """基于失败记录重新生成一篇新草稿/失败记录，不覆盖原失败记录。"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+    if article_status_public_value(article.status) != ArticleStatus.FAILED.value:
+        raise HTTPException(400, "只有失败文章可以重新生成")
+
+    item_ids = await _infer_retry_content_ids(article, db)
+    if not item_ids:
+        raise HTTPException(400, "无法从失败记录中恢复原始素材，请从内容池重新选择素材生成")
+
+    first_item = await db.get(ContentItem, item_ids[0])
+    domain = first_item.domain if first_item else "tech"
+    params = GenerateParams(domain=domain, item_ids=item_ids, focus=_article_retry_focus(article))
+    result = await generate_article(params, db)
+    if isinstance(result, dict):
+        result["retried_from_id"] = article.id
+        result["retry_item_ids"] = item_ids
+    return result
 
 
 @router.post("/{article_id}/publish")
@@ -395,6 +993,45 @@ async def review_article(article_id: str, db: AsyncSession = Depends(get_db)):
     return response
 
 
+@router.post("/{article_id}/submit-review")
+async def submit_article_review(article_id: str, db: AsyncSession = Depends(get_db)):
+    """将草稿送入人工审核队列。"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+    if article_status_public_value(article.status) == ArticleStatus.FAILED.value:
+        raise HTTPException(400, "失败文章不能送审")
+    article.status = ArticleStatus.REVIEWING
+    await db.commit()
+    return {"article_id": article_id, "status": ArticleStatus.REVIEWING.value}
+
+
+@router.post("/{article_id}/approve")
+async def approve_article(article_id: str, db: AsyncSession = Depends(get_db)):
+    """人工审核通过，进入待发布状态。"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+    if article_status_public_value(article.status) == ArticleStatus.FAILED.value:
+        raise HTTPException(400, "失败文章不能审核通过")
+    article.status = ArticleStatus.APPROVED
+    await db.commit()
+    return {"article_id": article_id, "status": ArticleStatus.APPROVED.value}
+
+
+@router.post("/{article_id}/return-to-draft")
+async def return_article_to_draft(article_id: str, db: AsyncSession = Depends(get_db)):
+    """人工退回修改。"""
+    article = await db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "文章不存在")
+    if article_status_public_value(article.status) == ArticleStatus.PUBLISHED.value:
+        raise HTTPException(400, "已发布文章不能退回草稿")
+    article.status = ArticleStatus.DRAFT
+    await db.commit()
+    return {"article_id": article_id, "status": ArticleStatus.DRAFT.value}
+
+
 @router.get("")
 async def list_articles(
     status: str | None = None,
@@ -428,6 +1065,7 @@ async def list_articles(
             "like_count": r.like_count,
             "created_at": r.created_at.isoformat(),
             "published_at": r.published_at.isoformat() if r.published_at else None,
+            "scheduled_publish_at": r.scheduled_publish_at.isoformat() if r.scheduled_publish_at else None,
             "has_illustrations": bool(r.agent_trace and len(r.agent_trace) > 2 and r.agent_trace[2] and r.agent_trace[2].get("cover")),
             "has_review": bool(r.agent_trace and len(r.agent_trace) > 3 and r.agent_trace[3] and r.agent_trace[3].get("review")),
         } for r in rows],
@@ -449,6 +1087,7 @@ async def get_article_stats(db: AsyncSession = Depends(get_db)):
         return {
             "overview": {"total_articles": 0, "total_reads": 0, "total_shares": 0, "total_favorites": 0},
             "by_domain": [],
+            "by_source": [],
             "by_day": [],
             "top_articles": [],
         }
@@ -486,6 +1125,40 @@ async def get_article_stats(db: AsyncSession = Depends(get_db)):
             "avg_reads": round(s["reads"] / s["count"], 1) if s["count"] > 0 else 0,
         }
         for d, s in sorted(domain_stats.items(), key=lambda x: x[1]["reads"], reverse=True)
+    ]
+
+    # 2b. 按素材来源复盘：一篇文章可能引用多个来源，各来源各记一次贡献。
+    source_stats: dict[str, dict] = {}
+    published_for_source = [
+        a for a in all_articles
+        if article_status_public_value(a.status) == ArticleStatus.PUBLISHED.value and a.source_content_ids
+    ]
+    for article in published_for_source:
+        source_ids = article.source_content_ids if isinstance(article.source_content_ids, list) else []
+        for item_id in source_ids:
+            item = await db.get(ContentItem, item_id)
+            if not item:
+                continue
+            source = item.source or "unknown"
+            if source not in source_stats:
+                source_stats[source] = {"articles": set(), "materials": 0, "reads": 0, "shares": 0, "favorites": 0}
+            source_stats[source]["articles"].add(article.id)
+            source_stats[source]["materials"] += 1
+            source_stats[source]["reads"] += article.read_count or 0
+            source_stats[source]["shares"] += article.share_count or 0
+            source_stats[source]["favorites"] += article.favorite_count or 0
+
+    by_source = [
+        {
+            "source": source,
+            "article_count": len(data["articles"]),
+            "material_refs": data["materials"],
+            "total_reads": data["reads"],
+            "total_shares": data["shares"],
+            "total_favorites": data["favorites"],
+            "avg_reads": round(data["reads"] / len(data["articles"]), 1) if data["articles"] else 0,
+        }
+        for source, data in sorted(source_stats.items(), key=lambda x: x[1]["reads"], reverse=True)
     ]
 
     # 3. 按日阅读趋势（从数据库统计）
@@ -531,6 +1204,7 @@ async def get_article_stats(db: AsyncSession = Depends(get_db)):
             } if best else None,
         },
         "by_domain": by_domain,
+        "by_source": by_source,
         "by_day": by_day,
         "top_articles": top_articles,
     }
@@ -623,6 +1297,29 @@ async def get_article(article_id: str, db: AsyncSession = Depends(get_db)):
     if not article:
         raise HTTPException(404, "文章不存在")
     return article
+
+
+@router.post("/batch-delete")
+async def batch_delete_articles(body: ArticleBatchDeleteRequest, db: AsyncSession = Depends(get_db)):
+    """批量删除文章。"""
+    try:
+        ids = _normalize_batch_delete_ids(body.ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    result = await db.execute(select(Article).where(Article.id.in_(ids)))
+    articles = result.scalars().all()
+    deleted_ids = []
+    for article in articles:
+        await db.delete(article)
+        deleted_ids.append(article.id)
+    await db.commit()
+    return {
+        "success": True,
+        "deleted_ids": deleted_ids,
+        "deleted": len(deleted_ids),
+        "total_requested": len(ids),
+    }
 
 
 @router.delete("/{article_id}")
@@ -876,15 +1573,27 @@ async def export_article_markdown(article_id: str, db: AsyncSession = Depends(ge
     )
 
 
-class IllustrationUploadParams(BaseModel):
-    type: str  # "cover" 或者索引数字如 "0", "1"
-    image_url: str
-
 class ArticleUpdateParams(BaseModel):
     title: str | None = None
     body: str | None = None
     summary: str | None = None
     status: str | None = None
+
+
+def _strip_workflow_artifacts_from_body(body: str) -> str:
+    """Remove image-generation workflow prompt blocks from editable article body."""
+    if not body:
+        return body
+    patterns = [
+        r"\n?\s*>\s*\*\*\[待生成封面图\s*Prompt\]\*\*\s*[：:].*?(?=\n\s*\n|\Z)",
+        r"\n?\s*>\s*\*\*\[待生成插图\s*\d+\s*Prompt\]\*\*\s*[：:].*?(?=\n\s*\n|\Z)",
+        r"\n?\s*>\s*\*\*\[[^\]]*(?:封面图|插图|配图|图片)[^\]]*Prompt[^\]]*\]\*\*\s*[：:].*?(?=\n\s*\n|\Z)",
+    ]
+    cleaned = body
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 @router.put("/{article_id}")
@@ -903,11 +1612,12 @@ async def update_article(
     if params.summary is not None:
         article.summary = params.summary
     if params.body is not None:
+        clean_body = _strip_workflow_artifacts_from_body(params.body)
         # 智能兼容：如果是 Markdown 文本，自动在后端转换为微信 HTML 格式并持久化
-        if "<p" not in params.body and "<div" not in params.body:
+        if "<p" not in clean_body and "<div" not in clean_body:
             prepared = publisher_agent.prepare(
                 title=params.title or article.title,
-                body=params.body,
+                body=clean_body,
                 summary=params.summary or article.summary,
             )
             article.body = prepared["body"]
@@ -924,14 +1634,14 @@ async def update_article(
                 else:
                     new_trace.append(item)
             
-            new_trace[1]["body"] = params.body
+            new_trace[1]["body"] = clean_body
             article.agent_trace = new_trace
             
             # 强行标记变更以确保 SQLAlchemy 必将 json 字段打包进 UPDATE 执行
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(article, "agent_trace")
         else:
-            article.body = params.body
+            article.body = clean_body
 
     if params.status is not None:
         try:

@@ -30,6 +30,7 @@ SYSTEM_PROMPT = """你是一个专业的绘本插画师。你只为文章生成*
 - 人物：采用正常舒缓的人体比例，面部神态安详、松弛，展现健康活力的中老年人或舒缓的自然场景。避免夸张的卡通或儿童化比例。
 - 线条：用 **faint pencil outline** 或 **soft charcoal sketch** 淡淡打底，甚至不着痕迹，主要靠水彩的晕染来塑造形体。
 - 背景：富有呼吸感的淡雅水彩背景。内文插图可以有自然的留白（soft vignetting / white background wash），封面图则需要画面完整。
+- 封面图不要要求留白，不要为了标题文字预留空白区域；封面应该是一张完整可直接使用的水彩画面。
 - 色调：采用草本植物色（herbal greens）、松石蓝（soft teal）、暖燕麦色（warm oat）、淡雅琥珀色（soft amber），拒绝高饱和度色及刺眼的亮色。
 
 ## 输出格式（JSON）
@@ -117,6 +118,7 @@ class IllustrationEditorAgent:
         visual_style = data.get("visual_style") or STYLE_LOCK
         if STYLE_LOCK not in visual_style:
             visual_style = f"{STYLE_LOCK}, {visual_style}"
+        visual_style = self._dedupe_style_lock(visual_style)
         data["visual_style"] = visual_style
         data["cover"] = self._normalize_prompt_item(data.get("cover") or {}, visual_style, "16:9", is_cover=True)
         data["illustrations"] = [
@@ -131,6 +133,7 @@ class IllustrationEditorAgent:
         prompt = self._strip_cover_whitespace_instruction(prompt) if is_cover else prompt
         if STYLE_LOCK not in prompt:
             prompt = f"{visual_style}, {prompt}".strip(" ,")
+        prompt = self._dedupe_style_lock(prompt)
         if ratio not in prompt:
             prompt = f"{prompt}, {ratio} aspect ratio"
 
@@ -140,6 +143,17 @@ class IllustrationEditorAgent:
         normalized["aspect_ratio"] = ratio
         normalized.pop("style", None)
         return normalized
+
+    def _dedupe_style_lock(self, text: str) -> str:
+        if not text:
+            return text
+        first = text.find(STYLE_LOCK)
+        if first < 0:
+            return text
+        before = text[: first + len(STYLE_LOCK)]
+        after = text[first + len(STYLE_LOCK):].replace(STYLE_LOCK, "")
+        cleaned = f"{before}{after}"
+        return " ".join(cleaned.replace(", ,", ",").replace(",,", ",").split()).strip(" ,")
 
     def _strip_cover_whitespace_instruction(self, prompt: str) -> str:
         banned_phrases = [

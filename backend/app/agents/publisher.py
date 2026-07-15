@@ -13,6 +13,10 @@ class PublisherAgent:
         self.max_length = max_length
 
     def prepare(self, title: str, body: str, summary: Optional[str] = None) -> dict:
+        title = self._reduce_stylistic_quotes(title)
+        body = self._reduce_stylistic_quotes(body)
+        if summary:
+            summary = self._reduce_stylistic_quotes(summary)
         html = self._markdown_to_wechat_html(body)
         if not summary:
             summary = self._auto_summary(body)
@@ -27,6 +31,37 @@ class PublisherAgent:
             "platform": self.platform,
             "word_count": chinese_count,
         }
+
+    def _reduce_stylistic_quotes(self, text: str) -> str:
+        """Remove decorative quotes around short concept terms while preserving dialogue."""
+        if not text:
+            return text
+
+        def replace_match(match: re.Match) -> str:
+            prefix = match.group(1) or ""
+            inner = match.group(2) or match.group(3) or ""
+            if prefix.endswith(("说：", "问：", "道：", "喊：", "抱怨：", "提醒：")):
+                return match.group(0)
+            if re.search(r"[，。！？!?；;：:、,.]", inner):
+                return match.group(0)
+            if len(inner) > 14:
+                return match.group(0)
+            return f"{prefix}{inner}"
+
+        reduced = re.sub(r"([^。\n！？!?]{0,4})(?:“([^”]{1,30})”|\"([^\"]{1,30})\")", replace_match, text)
+
+        # The contextual regex above deliberately protects dialogue, but it can
+        # miss short quoted concepts near punctuation. Run a second conservative
+        # pass for common generated-article concept labels.
+        concept_terms = (
+            "减盐", "低盐", "薄盐", "淡盐", "轻盐",
+            "隐形盐", "隐形钠", "总钠量", "少放盐",
+            "清淡", "健康陷阱", "可以多放", "钠超标",
+            "高钾食物", "看得见的盐", "尝得出的咸",
+        )
+        for term in concept_terms:
+            reduced = reduced.replace(f"“{term}”", term).replace(f'"{term}"', term)
+        return reduced
 
     def _markdown_to_wechat_html(self, markdown_text: str) -> str:
         # 清除未上传图片的占位符行，避免输出到微信 HTML 板式

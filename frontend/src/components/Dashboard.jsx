@@ -102,7 +102,7 @@ export default function Dashboard() {
     )
   }
 
-  const { overview, by_domain, by_day, top_articles } = stats
+  const { overview, by_domain, by_source = [], by_day, top_articles } = stats
 
   return (
     <div className="space-y-8">
@@ -222,6 +222,27 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="surface rounded-[1.5rem] p-5">
+        <h3 className="mb-4 text-sm font-semibold text-zinc-900">素材来源复盘</h3>
+        {by_source.length === 0 ? (
+          <p className="text-xs text-zinc-400">暂无可归因的素材来源数据。生成文章时引用素材后，发布表现会在这里按来源归因。</p>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {by_source.map((s) => (
+              <div key={s.source} className="rounded-2xl border border-zinc-100 bg-zinc-50/60 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-zinc-900">{s.source}</span>
+                  <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-mono text-zinc-400">{s.material_refs} 引用</span>
+                </div>
+                <p className="mt-3 font-mono text-2xl font-semibold text-zinc-950">{s.total_reads}</p>
+                <p className="mt-1 text-xs text-zinc-400">{s.article_count} 篇文章 · 平均 {s.avg_reads} 阅读</p>
+                <p className="mt-2 text-[11px] text-zinc-400">{s.total_shares} 分享 · {s.total_favorites} 收藏</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 文章排行 */}

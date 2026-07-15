@@ -38,8 +38,23 @@ def parse_llm_json(raw: str) -> dict:
 _client = None
 
 
+class LLMConfigurationError(RuntimeError):
+    """Raised when LLM settings are missing or still use placeholder values."""
+
+
+def ensure_llm_configured() -> None:
+    api_key = (settings.llm_api_key or "").strip()
+    placeholder_values = {"your_deepseek_api_key_here", "your_api_key_here"}
+    if not api_key or api_key in placeholder_values:
+        raise LLMConfigurationError(
+            "缺少 LLM_API_KEY。请在 backend/.env 中配置 DeepSeek/OpenAI 兼容 API Key，"
+            "或在启动后端前设置 LLM_API_KEY 环境变量。"
+        )
+
+
 def get_llm_client() -> AsyncOpenAI:
     global _client
+    ensure_llm_configured()
     if _client is None:
         _client = AsyncOpenAI(
             api_key=settings.llm_api_key,

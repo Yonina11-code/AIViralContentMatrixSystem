@@ -16,8 +16,6 @@ class Domain(Base):
     folo_keywords: Mapped[list] = mapped_column(JSON, default=list)
     search_keywords: Mapped[list] = mapped_column(JSON, default=list)
     rss_feed_urls: Mapped[list] = mapped_column(JSON, default=list)
-    wechat_ids: Mapped[list] = mapped_column(JSON, default=list)
-    xiaohongshu_ids: Mapped[list] = mapped_column(JSON, default=list)
     description: Mapped[str] = mapped_column(Text, nullable=True, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

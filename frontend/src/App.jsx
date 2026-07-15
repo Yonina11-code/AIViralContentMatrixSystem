@@ -5,6 +5,7 @@ import Assets from './components/Assets'
 import Generate from './components/Generate'
 import Domains from './components/Domains'
 import Dashboard from './components/Dashboard'
+import Operations from './components/Operations'
 
 const TABS = [
   { key: 'dashboard', label: '数据看板', short: '看板', hint: '阅读与发布表现' },
@@ -13,6 +14,7 @@ const TABS = [
   { key: 'articles', label: '文章管理', short: '文章', hint: '审核、发布、导出' },
   { key: 'assets', label: '内容资产', short: '资产', hint: '模板、规则、案例' },
   { key: 'generate', label: '一键生成', short: '生成', hint: '从素材到成稿' },
+  { key: 'operations', label: '运营日历', short: '运营', hint: '定时采集与预约发布' },
 ]
 
 const panels = {
@@ -22,6 +24,7 @@ const panels = {
   articles: <Articles />,
   assets: <Assets />,
   generate: <Generate />,
+  operations: <Operations />,
 }
 
 function readHashTab() {
@@ -108,7 +111,7 @@ export default function App() {
                   <button
                     key={tab.key}
                     onClick={() => selectTab(tab.key)}
-                    className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] ${
                       activeTab === tab.key
                         ? 'bg-zinc-950 text-white shadow-[0_14px_30px_-22px_rgba(24,24,27,0.8)]'
                         : 'bg-white text-zinc-500 ring-1 ring-zinc-200/80'

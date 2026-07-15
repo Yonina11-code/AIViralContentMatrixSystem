@@ -67,6 +67,7 @@ class Article(Base):
 
     # Publishing
     published_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    scheduled_publish_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     publish_platform_id: Mapped[str] = mapped_column(String(200), nullable=True)
 
     # Performance metrics (read back after publish)

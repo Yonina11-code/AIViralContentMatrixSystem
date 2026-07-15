@@ -13,6 +13,7 @@ class ContentSource(str, enum.Enum):
     RSS = "rss"
     SEARCH_ENGINE = "search_engine"
     FOLO = "folo"
+    WECHAT = "wechat"
 
 
 class ContentItem(Base):

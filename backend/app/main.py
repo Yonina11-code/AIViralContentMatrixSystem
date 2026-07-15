@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import init_db
-from app.api import content, assets, articles, domains
+from app.api import content, assets, articles, domains, operations
 
 
 @asynccontextmanager
@@ -41,6 +41,7 @@ app.include_router(content.router)
 app.include_router(assets.router)
 app.include_router(articles.router)
 app.include_router(domains.router)
+app.include_router(operations.router)
 
 # Mount static files folder
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")

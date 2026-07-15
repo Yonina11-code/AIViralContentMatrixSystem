@@ -215,28 +215,26 @@ function renderMarkdownToHtml(markdownText, suggestions = [], issues = []) {
         const res = highlightFlexibleText(finalHtml, original, highlightHtmlGen);
         if (res.matched) {
           finalHtml = res.html;
-          const cardHtml = `
-            <div class="sug-card my-3 bg-blue-50/90 border border-blue-200/60 rounded-xl p-3 text-xs text-blue-800 space-y-1.5 shadow-sm" style="margin:12px 0;">
-              <div class="flex items-center justify-between gap-2">
-                <span class="font-bold text-blue-900 flex items-center gap-1">
-                  <span class="h-2 w-2 bg-blue-500 inline-block" style="display:inline-block;width:8px;height:8px;border-radius:50%;"></span>
-                  💡 段落优化润色建议
-                </span>
-                <button 
-                  type="button" 
-                  class="apply-sug-btn px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-semibold cursor-pointer border-0 active:scale-95 transition-all"
-                  data-idx="${idx}"
-                >
-                  ✓ 一键采纳
-                </button>
+          const cardHtml = `<div class="sug-card" style="white-space:normal;margin:10px 0 14px;padding:12px 12px 12px 14px;border:1px solid #dbeafe;border-left:3px solid #2563eb;border-radius:12px;background:#fff;box-shadow:0 12px 28px -24px rgba(37,99,235,.55);font-size:12px;color:#27272a;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:7px;min-width:0;color:#1d4ed8;font-size:12px;font-weight:750;line-height:1.2;">
+                <span style="display:inline-block;width:7px;height:7px;border-radius:999px;background:#3b82f6;box-shadow:0 0 0 4px rgba(59,130,246,.12);"></span>
+                <span>段落优化建议</span>
               </div>
-              <p class="font-semibold text-zinc-800" style="margin:4px 0 6px;">${sug.description}</p>
-              <div class="bg-white/80 p-2 rounded border border-blue-100 text-[11px] text-blue-900 leading-relaxed font-mono">
-                <p class="line-through text-zinc-400" style="text-decoration:line-through;color:#a1a1aa;margin:0;">原文: ${sug.original_text}</p>
-                <p class="font-bold mt-1 text-blue-700" style="margin:4px 0 0;">建议替换为: ${sug.suggested_text}</p>
+              <button type="button" class="apply-sug-btn" data-idx="${idx}" style="flex:0 0 auto;height:30px;padding:0 12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-size:11px;font-weight:750;line-height:30px;white-space:nowrap;cursor:pointer;box-shadow:0 10px 22px -16px rgba(37,99,235,.95);">✓ 采纳</button>
+            </div>
+            <div style="margin:0 0 10px;color:#18181b;font-size:13px;font-weight:650;line-height:1.7;">${sug.description}</div>
+            <div style="display:grid;gap:6px;line-height:1.65;">
+              <div style="display:grid;grid-template-columns:46px minmax(0,1fr);gap:8px;align-items:start;padding:8px 9px;border-radius:9px;background:#f8fafc;border:1px solid #e2e8f0;">
+                <span style="color:#94a3b8;font-size:10px;font-weight:750;line-height:1.6;">原文</span>
+                <span style="color:#71717a;font-size:11px;text-decoration:line-through;text-decoration-thickness:1px;text-decoration-color:#cbd5e1;">${sug.original_text}</span>
+              </div>
+              <div style="display:grid;grid-template-columns:46px minmax(0,1fr);gap:8px;align-items:start;padding:8px 9px;border-radius:9px;background:#eff6ff;border:1px solid #bfdbfe;">
+                <span style="color:#2563eb;font-size:10px;font-weight:750;line-height:1.6;">替换</span>
+                <span style="color:#1d4ed8;font-size:12px;font-weight:750;">${sug.suggested_text}</span>
               </div>
             </div>
-          `;
+          </div>`;
           const targetString = `${highlightId}" class="sug-highlight`;
           const searchIndex = finalHtml.indexOf(targetString);
           if (searchIndex !== -1) {
@@ -404,13 +402,17 @@ export default function Articles() {
   const [loadError, setLoadError] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [selectedArticle, setSelectedArticle] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set())
   const [fullArticle, setFullArticle] = useState(null)
   const [loadingFull, setLoadingFull] = useState(false)
   const [viewingFull, setViewingFull] = useState(false)
   const [reviewing, setReviewing] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
   const [reviewResult, setReviewResult] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  const [batchDeleting, setBatchDeleting] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [scheduleTime, setScheduleTime] = useState('')
 
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -587,9 +589,6 @@ export default function Articles() {
             if (ill.section_title) {
               if (ill.image_url) {
                 cleanMarkdown = insertImageToMarkdown(cleanMarkdown, ill.section_title, ill.image_url)
-              } else {
-                const promptPlaceholder = `> **[待生成插图 ${idx + 1} Prompt]**：${ill.prompt || ''}`
-                cleanMarkdown = insertPromptPlaceholderToMarkdown(cleanMarkdown, ill.section_title, promptPlaceholder)
               }
             }
           })
@@ -597,9 +596,6 @@ export default function Articles() {
         if (imgs.cover) {
           if (imgs.cover.image_url) {
             cleanMarkdown = insertCoverToMarkdown(cleanMarkdown, imgs.cover.image_url)
-          } else {
-            const coverPlaceholder = `> **[待生成封面图 Prompt]**：${imgs.cover.prompt || ''}`
-            cleanMarkdown = insertCoverPlaceholderToMarkdown(cleanMarkdown, coverPlaceholder)
           }
         }
       }
@@ -651,6 +647,7 @@ export default function Articles() {
       })
       setArticles(data.items)
       setTotal(data.total || 0)
+      setSelectedIds(new Set())
     } catch (e) {
       console.error(e)
       setLoadError(e.message)
@@ -696,6 +693,90 @@ export default function Articles() {
       console.error(e)
     } finally {
       setReviewing(false)
+    }
+  }
+
+  const handleStatusAction = async (action) => {
+    if (!selectedArticle) return
+    try {
+      if (action === 'submit') await api.submitArticleReview(selectedArticle.id)
+      if (action === 'approve') await api.approveArticle(selectedArticle.id)
+      if (action === 'return') await api.returnArticleToDraft(selectedArticle.id)
+      const data = await api.getArticles({ status: statusFilter || undefined })
+      setArticles(data.items)
+      const updated = data.items.find(a => a.id === selectedArticle.id)
+      if (updated) setSelectedArticle(updated)
+      else fetchArticles()
+    } catch (e) {
+      alert('状态更新失败：' + e.message)
+    }
+  }
+
+  const handleRegenerate = async () => {
+    if (!selectedArticle) return
+    if (!window.confirm(`基于失败记录重新生成「${selectedArticle.title}」？原失败记录会保留。`)) return
+    setRegenerating(true)
+    try {
+      const result = await api.regenerateArticle(selectedArticle.id)
+      const data = await api.getArticles({ status: statusFilter || undefined })
+      setArticles(data.items)
+      const next = data.items.find(a => a.id === result.id)
+      if (next) setSelectedArticle(next)
+      if (result.error) {
+        alert('已重新生成，但新稿仍未通过审核，已保存为新的失败记录。')
+      } else {
+        alert('已重新生成新草稿。')
+      }
+    } catch (e) {
+      alert('重新生成失败：' + e.message)
+    } finally {
+      setRegenerating(false)
+    }
+  }
+
+  const allSelected = articles.length > 0 && selectedIds.size === articles.length
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleSelectAll = () => {
+    if (allSelected) setSelectedIds(new Set())
+    else setSelectedIds(new Set(articles.map(a => a.id)))
+  }
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return
+    if (!window.confirm(`确定删除选中的 ${selectedIds.size} 篇文章？此操作不可撤销。`)) return
+    setBatchDeleting(true)
+    try {
+      await api.batchDeleteArticles([...selectedIds])
+      if (selectedArticle && selectedIds.has(selectedArticle.id)) {
+        setSelectedArticle(null)
+        setFullArticle(null)
+      }
+      setSelectedIds(new Set())
+      fetchArticles()
+    } catch (e) {
+      alert('批量删除失败：' + e.message)
+    } finally {
+      setBatchDeleting(false)
+    }
+  }
+
+  const handleSchedulePublish = async () => {
+    if (!selectedArticle || !scheduleTime) return
+    try {
+      await api.scheduleArticle(selectedArticle.id, new Date(scheduleTime).toISOString())
+      const data = await api.getArticles({ status: statusFilter || undefined })
+      setArticles(data.items)
+      const updated = data.items.find(a => a.id === selectedArticle.id)
+      if (updated) setSelectedArticle(updated)
+      alert('已加入预约发布日历')
+    } catch (e) {
+      alert('预约发布失败：' + e.message)
     }
   }
 
@@ -824,16 +905,12 @@ export default function Articles() {
   const handleRemoveCover = async () => {
     await api.saveIllustrationImage(selectedArticle.id, 'cover', '')
     const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
-    const coverPrompt = imgs?.cover?.prompt || ''
-    const coverPlaceholder = `> **[待生成封面图 Prompt]**：${coverPrompt}`
 
     if (isEditing) {
       const targetTag = `![封面配图](${imgs?.cover?.image_url})`
       let newMarkdown = editBody
       if (imgs?.cover?.image_url && editBody.includes(targetTag)) {
-        newMarkdown = editBody.replace(targetTag, coverPlaceholder)
-      } else {
-        newMarkdown = insertCoverPlaceholderToMarkdown(editBody, coverPlaceholder)
+        newMarkdown = editBody.replace(targetTag, '').replace(/\n{3,}/g, '\n\n').trim()
       }
       setEditBody(newMarkdown)
     } else {
@@ -842,9 +919,7 @@ export default function Articles() {
         const targetTag = `![封面配图](${imgs?.cover?.image_url})`
         let newMarkdown = currentMarkdown
         if (imgs?.cover?.image_url && currentMarkdown.includes(targetTag)) {
-          newMarkdown = currentMarkdown.replace(targetTag, coverPlaceholder)
-        } else {
-          newMarkdown = insertCoverPlaceholderToMarkdown(currentMarkdown, coverPlaceholder)
+          newMarkdown = currentMarkdown.replace(targetTag, '').replace(/\n{3,}/g, '\n\n').trim()
         }
         await api.updateArticle(selectedArticle.id, {
           title: fullArticle.title,
@@ -860,15 +935,12 @@ export default function Articles() {
     await api.saveIllustrationImage(selectedArticle.id, String(index), '')
     const imgs = fullArticle?.agent_trace?.[2] || selectedArticle?.agent_trace?.[2]
     const ill = imgs?.illustrations?.[index]
-    const promptPlaceholder = `> **[待生成插图 ${index + 1} Prompt]**：${ill?.prompt || ''}`
 
     if (isEditing) {
       const targetTag = `![插图](${ill?.image_url})`
       let newMarkdown = editBody
       if (ill?.image_url && editBody.includes(targetTag)) {
-        newMarkdown = editBody.replace(targetTag, promptPlaceholder)
-      } else {
-        newMarkdown = insertPromptPlaceholderToMarkdown(editBody, ill?.section_title || '', promptPlaceholder)
+        newMarkdown = editBody.replace(targetTag, '').replace(/\n{3,}/g, '\n\n').trim()
       }
       setEditBody(newMarkdown)
     } else {
@@ -877,9 +949,7 @@ export default function Articles() {
         const targetTag = `![插图](${ill?.image_url})`
         let newMarkdown = currentMarkdown
         if (ill?.image_url && currentMarkdown.includes(targetTag)) {
-          newMarkdown = currentMarkdown.replace(targetTag, promptPlaceholder)
-        } else {
-          newMarkdown = insertPromptPlaceholderToMarkdown(currentMarkdown, ill?.section_title || '', promptPlaceholder)
+          newMarkdown = currentMarkdown.replace(targetTag, '').replace(/\n{3,}/g, '\n\n').trim()
         }
         await api.updateArticle(selectedArticle.id, {
           title: fullArticle.title,
@@ -1107,7 +1177,7 @@ export default function Articles() {
             })()}
           </div>
           
-          <div className="flex items-center gap-3 pt-4 border-t border-zinc-100 justify-end">
+          <div className="flex flex-wrap items-center justify-end gap-3 border-t border-zinc-100 pt-4">
             <button onClick={() => setIsEditing(false)} className="btn-secondary px-6 h-10 text-xs font-medium cursor-pointer">
               取消修改
             </button>
@@ -1131,7 +1201,7 @@ export default function Articles() {
             
             <div 
               onClick={handlePreviewClick}
-              className="flex-1 wechat-preview whitespace-pre-wrap break-words text-sm text-zinc-800 leading-relaxed font-sans overflow-y-auto pr-1"
+              className="flex-1 wechat-preview break-words text-sm text-zinc-800 leading-relaxed font-sans overflow-y-auto pr-1"
               dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(editBody, suggestions, selectedReview?.issues) }}
             />
           </div>
@@ -1301,11 +1371,25 @@ export default function Articles() {
             <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-950">文章列表</h2>
             <p className="mt-1 text-sm text-zinc-500">挑选草稿、校验风险、生成插图并发布。</p>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="flex flex-nowrap items-center gap-2 overflow-x-auto pb-1 sm:justify-end sm:pb-0">
+            <label className="flex h-10 shrink-0 items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/70 px-3 text-xs text-zinc-500 cursor-pointer select-none whitespace-nowrap">
+              <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
+                className="h-3.5 w-3.5 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-900/20 accent-zinc-900" />
+              <span>全选</span>
+            </label>
+            {selectedIds.size > 0 && (
+              <button
+                onClick={handleBatchDelete}
+                disabled={batchDeleting}
+                className="btn-danger h-10 px-4 text-xs disabled:opacity-40"
+              >
+                {batchDeleting ? '删除中...' : `删除选中 ${selectedIds.size} 篇`}
+              </button>
+            )}
             <select
               value={statusFilter}
-              onChange={(e) => { setStatusFilter(e.target.value); setSelectedArticle(null) }}
-              className="control px-3 text-sm"
+              onChange={(e) => { setStatusFilter(e.target.value); setSelectedArticle(null); setSelectedIds(new Set()) }}
+              className="control h-10 shrink-0 px-3 text-sm"
             >
               <option value="">全部状态</option>
               <option value="draft">草稿</option>
@@ -1350,7 +1434,11 @@ export default function Articles() {
                     : 'surface hover:-translate-y-0.5 hover:border-zinc-300'
                 }`}
               >
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <label className="pt-0.5 cursor-pointer" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={selectedIds.has(a.id)} onChange={() => toggleSelect(a.id)}
+                      className="h-3.5 w-3.5 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-900/20 accent-zinc-900" />
+                  </label>
                   <div className="flex-1 min-w-0">
                     <h3 className="text-sm font-medium text-zinc-900 line-clamp-2">{a.title}</h3>
                     <div className="flex items-center gap-3 mt-2">
@@ -1439,7 +1527,7 @@ export default function Articles() {
                 {selectedArticle.status === 'failed' && (
                   <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 p-4">
                     <p className="text-sm font-semibold text-red-700">这篇文章未通过生成审核</p>
-                    <p className="mt-1 text-xs leading-5 text-red-600">失败记录用于排查选题、正文或审核问题，不建议直接下载发布。</p>
+                    <p className="mt-1 text-xs leading-5 text-red-600">失败记录用于排查问题，也可以基于原素材重新生成一篇新稿。</p>
                     {(() => {
                       const cleanIssues = (selectedReview?.issues || []).filter(issue => issue.type !== 'illustration')
                       if (cleanIssues.length === 0) return null
@@ -1454,6 +1542,16 @@ export default function Articles() {
                       )
                     })()}
                   </div>
+                )}
+
+                {selectedArticle.status === 'failed' && (
+                  <button
+                    onClick={handleRegenerate}
+                    disabled={regenerating}
+                    className="btn-primary h-11 w-full text-sm disabled:opacity-50 cursor-pointer"
+                  >
+                    {regenerating ? '重新生成中...' : '重新生成文章'}
+                  </button>
                 )}
 
                 <button
@@ -1480,6 +1578,33 @@ export default function Articles() {
                   {reviewing ? '校验中...' : '文稿校验'}
                 </button>
 
+                <div className="grid grid-cols-1 gap-2">
+                  {selectedArticle.status === 'draft' && (
+                    <button
+                      onClick={() => handleStatusAction('submit')}
+                      className="btn-secondary h-10 w-full text-xs text-amber-700 hover:bg-amber-50"
+                    >
+                      送入人工审核
+                    </button>
+                  )}
+                  {selectedArticle.status === 'reviewing' && (
+                    <button
+                      onClick={() => handleStatusAction('approve')}
+                      className="btn-secondary h-10 w-full text-xs text-blue-700 hover:bg-blue-50"
+                    >
+                      审核通过
+                    </button>
+                  )}
+                  {selectedArticle.status === 'reviewing' && (
+                    <button
+                      onClick={() => handleStatusAction('return')}
+                      className="btn-secondary h-10 w-full text-xs text-zinc-600 hover:bg-zinc-50"
+                    >
+                      退回修改
+                    </button>
+                  )}
+                </div>
+
                 <button
                   onClick={handleExport}
                   disabled={exporting || selectedArticle.status === 'failed'}
@@ -1487,6 +1612,25 @@ export default function Articles() {
                 >
                   {exporting ? '导出中...' : '文稿下载'}
                 </button>
+
+                {selectedArticle.status !== 'published' && selectedArticle.status !== 'failed' && (
+                  <div className="rounded-2xl border border-zinc-100 bg-zinc-50 p-3">
+                    <label className="mb-1.5 block text-xs font-medium text-zinc-500">预约发布时间</label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleTime}
+                      onChange={(e) => setScheduleTime(e.target.value)}
+                      className="control h-10 w-full px-3 text-xs"
+                    />
+                    <button
+                      onClick={handleSchedulePublish}
+                      disabled={!scheduleTime}
+                      className="btn-secondary mt-2 h-9 w-full text-xs disabled:opacity-40"
+                    >
+                      加入发布日历
+                    </button>
+                  </div>
+                )}
 
                 <button
                   onClick={handleDelete}
